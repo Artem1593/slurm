@@ -815,8 +815,8 @@ int main_jobpack(int argc, char *argv[])
 			xstrcat(pack_job_env[group_number].av[
 				packl_dependency_position], pack_job_id);
 		}
-		_copy_opt_struct( &opt, pack_job_env[group_number].opt);
-		_copy_job_desc_msg(&desc, pack_job_env[group_number].desc);
+		copy_opt_struct( &opt, pack_job_env[group_number].opt);
+		copy_job_desc_msg(&desc, pack_job_env[group_number].desc);
 
 		if (initialize_and_process_args(pack_job_env[group_number].ac,
 					pack_job_env[group_number].av) < 0) {
@@ -859,7 +859,7 @@ int main_jobpack(int argc, char *argv[])
 			if (env == NULL)
 				exit(error_exit);    /* error already logged */
 			_set_rlimits(env);
-			_copy_env(&pack_job_env[group_number].env, env);
+			copy_env(&pack_job_env[group_number].env, env);
 		}
 
 		/*
@@ -991,8 +991,8 @@ int main_jobpack(int argc, char *argv[])
 			       pack_job_env[group_number].av[
 			       packl_dependency_position]);
 		}
-		_copy_opt_struct(pack_job_env[group_number].opt, &opt);
-		_copy_job_desc_msg(pack_job_env[group_number].desc, &desc);
+		copy_opt_struct(pack_job_env[group_number].opt, &opt);
+		copy_job_desc_msg(pack_job_env[group_number].desc, &desc);
 	}
 
 	/* become the user after the allocation has been requested. */
@@ -1063,10 +1063,10 @@ int main_jobpack(int argc, char *argv[])
 	}
 	for (group_number = 0; group_number < pack_desc_count;
 	     group_number++) {
-		_copy_opt_struct(&opt, pack_job_env[group_number].opt);
-		_copy_job_desc_msg(&desc, pack_job_env[group_number].desc);
+		copy_opt_struct(&opt, pack_job_env[group_number].opt);
+		copy_job_desc_msg(&desc, pack_job_env[group_number].desc);
 		if (pack_job_env[group_number].env[0] != NULL) {
-			_copy_env(&env, pack_job_env[group_number].env);
+			copy_env(&env, pack_job_env[group_number].env);
 		} else {
 		        env = NULL;
 		}
@@ -1093,7 +1093,7 @@ int main_jobpack(int argc, char *argv[])
 		env_array_overwrite_fmt(&env, "SLURM_GROUP_NUMBER",
 					"%d", group_number);
 
-		_copy_alloc_struct(pack_job_env[group_number].alloc, alloc);
+		copy_alloc_struct(pack_job_env[group_number].alloc, alloc);
 
 		/*
 		 * Run the user's command.
@@ -1285,7 +1285,7 @@ relinquish:
 		pthread_mutex_unlock(&allocation_state_lock);
 		for (group_number = 0; group_number < pack_desc_count;
 		     group_number++) {
-			_copy_alloc_struct(alloc,
+			copy_alloc_struct(alloc,
 					   pack_job_env[group_number].alloc);
 			info("Relinquishing job allocation %u", alloc->job_id);
 			if ((slurm_complete_job(alloc->job_id, status) != 0) &&
