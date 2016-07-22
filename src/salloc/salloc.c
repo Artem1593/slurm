@@ -140,7 +140,18 @@ static void _set_submit_dir_env(void);
 static void _signal_while_allocating(int signo);
 static void _timeout_handler(srun_timeout_msg_t *msg);
 static void _user_msg_handler(srun_user_msg_t *msg);
-int main_jobpack(int argc, char *argv[]);
+static int _count_jobs(int ac, char **av);
+static void _build_env_structs(int ac, char **av);
+static void _identify_job_descriptions(int ac, char **av);
+static void _setup_job(allocation_msg_thread_t *msg_thr, job_desc_msg_t *desc,
+		       char **env, log_options_t logopt);
+static void _become_user(resource_allocation_response_msg_t *alloc,
+			 allocation_msg_thread_t *msg_thr);
+static void _set_opts(char ***env, resource_allocation_response_msg_t *alloc);
+static int _run_command(resource_allocation_response_msg_t *alloc,
+			int status, pid_t rc_pid);
+static int _setup_return(int status, pid_t rc_pid);
+static int main_jobpack(int argc, char *argv[]);
 
 #ifdef HAVE_BG
 static int _wait_bluegene_block_ready(
@@ -157,7 +168,7 @@ int sig_array[] = {
 	SIGTERM, SIGUSR1, SIGUSR2, 0
 };
 
-int _count_jobs(int ac, char **av)
+static int _count_jobs(int ac, char **av)
 {
 	int index;
 
@@ -327,50 +338,14 @@ static void _reset_input_mode (void)
 		tcsetpgrp(STDIN_FILENO, getpgid(getppid()));
 }
 
-int main(int argc, char *argv[])
+static void _setup_job(allocation_msg_thread_t *msg_thr, job_desc_msg_t *desc,
+		       char **env, log_options_t logopt)
 {
-	log_options_t logopt = LOG_OPTS_STDERR_ONLY;
-	job_desc_msg_t desc;
-	resource_allocation_response_msg_t *alloc;
-	time_t before, after;
-	allocation_msg_thread_t *msg_thr = NULL;
-	char **env = NULL, *cluster_name;
-	int status = 0;
-	int retries = 0;
-	pid_t pid  = getpid();
-	pid_t tpgid = 0;
-	pid_t rc_pid = 0;
-	int i, rc = 0;
-	static char *msg = "Slurm job queue full, sleeping and retrying.";
+
 	slurm_allocation_callbacks_t callbacks;
-	char* listjobids = NULL;
+	int i;
+	pid_t tpgid = 0;
 
-	slurm_conf_init(NULL);
-	log_init(xbasename(argv[0]), logopt, 0, NULL);
-	_set_exit_code();
-
-	if (_count_jobs(argc, argv)) {
-		rc = main_jobpack(argc, argv);
-		if (rc != 0)
-			error("jobpack processing failed");
-		return 0;
-	}
-
-	if (spank_init_allocator() < 0) {
-		error("Failed to initialize plugin stack");
-		exit(error_exit);
-	}
-
-	/* Be sure to call spank_fini when salloc exits
-	 */
-	if (atexit((void (*) (void)) spank_fini) < 0)
-		error("Failed to register atexit handler for plugins: %m");
-
-
-	if (initialize_and_process_args(argc, argv) < 0) {
-		error("salloc parameter parsing");
-		exit(error_exit);
-	}
 	/* reinit log with new verbosity (if changed by command line) */
 	if (opt.verbose || opt.quiet) {
 		logopt.stderr_level += opt.verbose;
@@ -415,7 +390,6 @@ int main(int argc, char *argv[])
 			exit(error_exit);    /* error already logged */
 		_set_rlimits(env);
 	}
-
 	/*
 	 * Job control for interactive salloc sessions: only if ...
 	 *
@@ -466,12 +440,7 @@ int main(int argc, char *argv[])
 	 */
 	if (is_interactive)
 		atexit (_reset_input_mode);
-
-	/*
-	 * Request a job allocation
-	 */
-	slurm_init_job_desc_msg(&desc);
-	if (_fill_job_desc_from_opts(&desc) == -1) {
+	if (_fill_job_desc_from_opts(desc) == -1) {
 		exit(error_exit);
 	}
 	if (opt.gid != (gid_t) -1) {
@@ -499,26 +468,18 @@ int main(int argc, char *argv[])
 	callbacks.node_fail = _node_fail_handler;
 
 	/* create message thread to handle pings and such from slurmctld */
-	msg_thr = slurm_allocation_msg_thr_create(&desc.other_port,
+	msg_thr = slurm_allocation_msg_thr_create(&desc->other_port,
 						  &callbacks);
 
 	/* NOTE: Do not process signals in separate pthread. The signal will
 	 * cause slurm_allocate_resources_blocking() to exit immediately. */
 	for (i = 0; sig_array[i]; i++)
 		xsignal(sig_array[i], _signal_while_allocating);
+}
 
-	before = time(NULL);
-	while ((alloc = slurm_allocate_resources_blocking(&desc, opt.immediate,
-					_pending_callback)) == NULL) {
-		if (((errno != ESLURM_ERROR_ON_DESC_TO_RECORD_COPY) &&
-		     (errno != EAGAIN)) || (retries >= MAX_RETRIES))
-			break;
-		if (retries == 0)
-			error("%s", msg);
-		else
-			debug("%s", msg);
-		sleep (++retries);
-	}
+static void _become_user(resource_allocation_response_msg_t *alloc,
+			 allocation_msg_thread_t *msg_thr)
+{
 
 	/* become the user after the allocation has been requested. */
 	if (opt.uid != (uid_t) -1) {
@@ -545,7 +506,253 @@ int main(int argc, char *argv[])
 		}
 		slurm_allocation_msg_thr_destroy(msg_thr);
 		exit(error_exit);
-	} else if (!allocation_interrupted) {
+	}
+}
+
+static void _set_opts(char ***env, resource_allocation_response_msg_t *alloc)
+{
+	char *cluster_name;
+	int i;
+
+	/* Add default task count for srun, if not already set */
+	if (opt.ntasks_set) {
+		env_array_append_fmt(env, "SLURM_NTASKS", "%d", opt.ntasks);
+		/* keep around for old scripts */
+
+		env_array_append_fmt(env, "SLURM_NPROCS", "%d", opt.ntasks);
+	}
+	if (opt.cpus_set) {
+		env_array_append_fmt(env, "SLURM_CPUS_PER_TASK", "%d",
+				     opt.cpus_per_task);
+	}
+	if (opt.overcommit) {
+		env_array_append_fmt(env, "SLURM_OVERCOMMIT", "%d",
+			opt.overcommit);
+	}
+	if (opt.acctg_freq) {
+		env_array_append_fmt(env, "SLURM_ACCTG_FREQ", "%s",
+			opt.acctg_freq);
+	}
+	if (opt.network)
+		env_array_append_fmt(env, "SLURM_NETWORK", "%s", opt.network);
+	cluster_name = slurm_get_cluster_name();
+	if (cluster_name) {
+		env_array_append_fmt(env, "SLURM_CLUSTER_NAME", "%s",
+				     cluster_name);
+		xfree(cluster_name);
+	}
+	if (alloc->env_size) {	/* Used to set Burst Buffer environment */
+		char *key, *value, *tmp;
+		for (i = 0; i < alloc->env_size; i++) {
+			tmp = xstrdup(alloc->environment[i]);
+			key = tmp;
+			value = strchr(tmp, '=');
+			if (value) {
+				value[0] = '\0';
+				value++;
+				env_array_append(env, key, value);
+			}
+			xfree(tmp);
+		}
+	}
+}
+
+static int _run_command(resource_allocation_response_msg_t *alloc,
+			int status, pid_t rc_pid)
+{
+	int rc = 0;
+	pid_t pid  = getpid();
+
+	slurm_mutex_lock(&allocation_state_lock);
+	if (allocation_state == REVOKED) {
+		error("Allocation was revoked for job %u before command could "
+		      "be run", alloc->job_id);
+		slurm_cond_broadcast(&allocation_state_cond);
+		slurm_mutex_unlock(&allocation_state_lock);
+		if (slurm_complete_job(alloc->job_id, status) != 0) {
+			error("Unable to clean up allocation for job %u: %m",
+			      alloc->job_id);
+		}
+		return 1;
+ 	}
+	allocation_state = GRANTED;
+	slurm_cond_broadcast(&allocation_state_cond);
+	slurm_mutex_unlock(&allocation_state_lock);
+
+	/*  Ensure that salloc has initial terminal foreground control.  */
+	if (is_interactive) {
+		/*
+		 * Ignore remaining job-control signals (other than those in
+		 * sig_array, which at this state act like SIG_IGN).
+		 */
+		xsignal(SIGTSTP, SIG_IGN);
+		xsignal(SIGTTIN, SIG_IGN);
+		xsignal(SIGTTOU, SIG_IGN);
+
+		pid = getpid();
+		setpgid(pid, pid);
+
+		tcsetpgrp(STDIN_FILENO, pid);
+	}
+	/*
+	 * Run the user's command.
+	 */
+	slurm_mutex_lock(&allocation_state_lock);
+	if (suspend_flag)
+		slurm_cond_wait(&allocation_state_cond, &allocation_state_lock);
+	command_pid = _fork_command(command_argv);
+	slurm_cond_broadcast(&allocation_state_cond);
+	slurm_mutex_unlock(&allocation_state_lock);
+
+	/*
+	 * Wait for command to exit, OR for waitpid to be interrupted by a
+	 * signal.  Either way, we are going to release the allocation next.
+	 */
+	if (command_pid > 0) {
+		setpgid(command_pid, command_pid);
+		if (is_interactive)
+			tcsetpgrp(STDIN_FILENO, command_pid);
+
+		/* NOTE: Do not process signals in separate pthread.
+		 * The signal will cause waitpid() to exit immediately. */
+		xsignal(SIGHUP,  _exit_on_signal);
+		/* Use WUNTRACED to treat stopped children like terminated ones */
+		do {
+			rc_pid = waitpid(command_pid, &status, WUNTRACED);
+		} while (WIFSTOPPED(status) || ((rc_pid == -1) && (!exit_flag)));
+		if ((rc_pid == -1) && (errno != EINTR))
+			error("waitpid for %s failed: %m", command_argv[0]);
+	}
+
+	if (is_interactive)
+		tcsetpgrp(STDIN_FILENO, pid);
+	return rc;
+}
+
+	/*
+	 * Relinquish the job allocation (if not already revoked).
+	 */
+relinquish:
+	slurm_mutex_lock(&allocation_state_lock);
+	if (allocation_state != REVOKED) {
+		slurm_mutex_unlock(&allocation_state_lock);
+
+		info("Relinquishing job allocation %u", alloc->job_id);
+		if ((slurm_complete_job(alloc->job_id, status) != 0) &&
+		    (slurm_get_errno() != ESLURM_ALREADY_DONE))
+			error("Unable to clean up job allocation %u: %m",
+			      alloc->job_id);
+		slurm_mutex_lock(&allocation_state_lock);
+		allocation_state = REVOKED;
+	}
+	slurm_cond_broadcast(&allocation_state_cond);
+	slurm_mutex_unlock(&allocation_state_lock);
+
+	slurm_free_resource_allocation_response_msg(alloc);
+	slurm_allocation_msg_thr_destroy(msg_thr);
+	
+static int _setup_return(int status, pid_t rc_pid)
+{
+	int rc = 0;
+
+	/*
+	 * Figure out what return code we should use.  If the user's command
+	 * exited normally, return the user's return code.
+	 */
+	rc = 1;
+	if (rc_pid != -1) {
+
+		if (WIFEXITED(status)) {
+			rc = WEXITSTATUS(status);
+		} else if (WIFSTOPPED(status)) {
+			/* Terminate stopped child process */
+			_forward_signal(SIGKILL);
+		} else if (WIFSIGNALED(status)) {
+			verbose("Command \"%s\" was terminated by signal %d",
+				command_argv[0], WTERMSIG(status));
+			/* if we get these signals we return a normal
+			 * exit since this was most likely sent from the
+			 * user */
+			switch(WTERMSIG(status)) {
+			case SIGHUP:
+			case SIGINT:
+			case SIGQUIT:
+			case SIGKILL:
+				rc = 0;
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
+	xfree(desc.clusters);
+	return rc;
+}
+
+int main(int argc, char *argv[])
+{
+	log_options_t logopt = LOG_OPTS_STDERR_ONLY;
+	job_desc_msg_t desc;
+	resource_allocation_response_msg_t *alloc;
+	time_t before, after;
+	allocation_msg_thread_t *msg_thr = NULL;
+	char **env = NULL;
+	int retries = 0;
+	int status = 0;
+	pid_t rc_pid = 0;
+	int rc = 0;
+	static char *msg = "Slurm job queue full, sleeping and retrying.";
+
+	char* listjobids = NULL;
+
+	slurm_conf_init(NULL);
+	log_init(xbasename(argv[0]), logopt, 0, NULL);
+	_set_exit_code();
+
+	if (_count_jobs(argc, argv)) {
+		rc = main_jobpack(argc, argv);
+		if (rc != 0)
+			error("jobpack processing failed");
+		return 0;
+	}
+
+	if (spank_init_allocator() < 0) {
+		error("Failed to initialize plugin stack");
+		exit(error_exit);
+	}
+
+	/* Be sure to call spank_fini when salloc exits
+	 */
+	if (atexit((void (*) (void)) spank_fini) < 0)
+		error("Failed to register atexit handler for plugins: %m");
+
+	if (initialize_and_process_args(argc, argv) < 0) {
+		error("salloc parameter parsing");
+		exit(error_exit);
+	}
+	slurm_init_job_desc_msg(&desc);
+	_setup_job(msg_thr, &desc, env, logopt);
+
+	before = time(NULL);
+	/*
+	 * Request a job allocation
+	 */
+	while ((alloc = slurm_allocate_resources_blocking(&desc, opt.immediate,
+					_pending_callback)) == NULL) {
+		if (((errno != ESLURM_ERROR_ON_DESC_TO_RECORD_COPY) &&
+		     (errno != EAGAIN)) || (retries >= MAX_RETRIES))
+			break;
+		if (retries == 0)
+			error("%s", msg);
+		else
+			debug("%s", msg);
+		sleep (++retries);
+	}
+
+	_become_user(alloc, msg_thr);
+
+	if (!allocation_interrupted) {
 		/*
 		 * Allocation granted!
 		 */
@@ -585,52 +792,10 @@ int main(int argc, char *argv[])
 		goto relinquish;
 	}
 
-	/*
-	 * Run the user's command.
-	 */
 	if (env_array_for_job(&env, alloc, &desc) != SLURM_SUCCESS)
 		goto relinquish;
 
-	/* Add default task count for srun, if not already set */
-	if (opt.ntasks_set) {
-		env_array_append_fmt(&env, "SLURM_NTASKS", "%d", opt.ntasks);
-		/* keep around for old scripts */
-		env_array_append_fmt(&env, "SLURM_NPROCS", "%d", opt.ntasks);
-	}
-	if (opt.cpus_set) {
-		env_array_append_fmt(&env, "SLURM_CPUS_PER_TASK", "%d",
-				     opt.cpus_per_task);
-	}
-	if (opt.overcommit) {
-		env_array_append_fmt(&env, "SLURM_OVERCOMMIT", "%d",
-			opt.overcommit);
-	}
-	if (opt.acctg_freq) {
-		env_array_append_fmt(&env, "SLURM_ACCTG_FREQ", "%s",
-			opt.acctg_freq);
-	}
-	if (opt.network)
-		env_array_append_fmt(&env, "SLURM_NETWORK", "%s", opt.network);
-	cluster_name = slurm_get_cluster_name();
-	if (cluster_name) {
-		env_array_append_fmt(&env, "SLURM_CLUSTER_NAME", "%s",
-				     cluster_name);
-		xfree(cluster_name);
-	}
-	if (alloc->env_size) {	/* Used to set Burst Buffer environment */
-		char *key, *value, *tmp;
-		for (i = 0; i < alloc->env_size; i++) {
-			tmp = xstrdup(alloc->environment[i]);
-			key = tmp;
-			value = strchr(tmp, '=');
-			if (value) {
-				value[0] = '\0';
-				value++;
-				env_array_append(&env, key, value);
-			}
-			xfree(tmp);
-		}
-	}
+	_set_opts(&env, alloc);
 
 	env_array_set_environment(env, -1);
 	env_array_free(env);
@@ -640,66 +805,9 @@ int main(int argc, char *argv[])
 	xfree(listjobids);
 	setenv("SLURM_NUMPACK", "1", 1);
 
-	slurm_mutex_lock(&allocation_state_lock);
-	if (allocation_state == REVOKED) {
-		error("Allocation was revoked for job %u before command could "
-		      "be run", alloc->job_id);
-		slurm_cond_broadcast(&allocation_state_cond);
-		slurm_mutex_unlock(&allocation_state_lock);
-		if (slurm_complete_job(alloc->job_id, status) != 0) {
-			error("Unable to clean up allocation for job %u: %m",
-			      alloc->job_id);
-		}
-		return 1;
- 	}
-	allocation_state = GRANTED;
-	slurm_cond_broadcast(&allocation_state_cond);
-	slurm_mutex_unlock(&allocation_state_lock);
-
-	/*  Ensure that salloc has initial terminal foreground control.  */
-	if (is_interactive) {
-		/*
-		 * Ignore remaining job-control signals (other than those in
-		 * sig_array, which at this state act like SIG_IGN).
-		 */
-		xsignal(SIGTSTP, SIG_IGN);
-		xsignal(SIGTTIN, SIG_IGN);
-		xsignal(SIGTTOU, SIG_IGN);
-
-		pid = getpid();
-		setpgid(pid, pid);
-
-		tcsetpgrp(STDIN_FILENO, pid);
-	}
-	slurm_mutex_lock(&allocation_state_lock);
-	if (suspend_flag)
-		slurm_cond_wait(&allocation_state_cond, &allocation_state_lock);
-	command_pid = _fork_command(command_argv);
-	slurm_cond_broadcast(&allocation_state_cond);
-	slurm_mutex_unlock(&allocation_state_lock);
-
-	/*
-	 * Wait for command to exit, OR for waitpid to be interrupted by a
-	 * signal.  Either way, we are going to release the allocation next.
-	 */
-	if (command_pid > 0) {
-		setpgid(command_pid, command_pid);
-		if (is_interactive)
-			tcsetpgrp(STDIN_FILENO, command_pid);
-
-		/* NOTE: Do not process signals in separate pthread.
-		 * The signal will cause waitpid() to exit immediately. */
-		xsignal(SIGHUP,  _exit_on_signal);
-		/* Use WUNTRACED to treat stopped children like terminated ones */
-		do {
-			rc_pid = waitpid(command_pid, &status, WUNTRACED);
-		} while (WIFSTOPPED(status) || ((rc_pid == -1) && (!exit_flag)));
-		if ((rc_pid == -1) && (errno != EINTR))
-			error("waitpid for %s failed: %m", command_argv[0]);
-	}
-
-	if (is_interactive)
-		tcsetpgrp(STDIN_FILENO, pid);
+	rc = _run_command(alloc, status, rc_pid );
+	if (rc)
+		return rc;
 
 	/*
 	 * Relinquish the job allocation (if not already revoked).
@@ -717,64 +825,30 @@ relinquish:
 		slurm_mutex_lock(&allocation_state_lock);
 		allocation_state = REVOKED;
 	}
-	slurm_cond_broadcast(&allocation_state_cond);
+	pthread_cond_broadcast(&allocation_state_cond);
 	slurm_mutex_unlock(&allocation_state_lock);
 
 	slurm_free_resource_allocation_response_msg(alloc);
 	slurm_allocation_msg_thr_destroy(msg_thr);
 
-	/*
-	 * Figure out what return code we should use.  If the user's command
-	 * exited normally, return the user's return code.
-	 */
-	rc = 1;
-	if (rc_pid != -1) {
-
-		if (WIFEXITED(status)) {
-			rc = WEXITSTATUS(status);
-		} else if (WIFSTOPPED(status)) {
-			/* Terminate stopped child process */
-			_forward_signal(SIGKILL);
-		} else if (WIFSIGNALED(status)) {
-			verbose("Command \"%s\" was terminated by signal %d",
-				command_argv[0], WTERMSIG(status));
-			/* if we get these signals we return a normal
-			 * exit since this was most likely sent from the
-			 * user */
-			switch(WTERMSIG(status)) {
-			case SIGHUP:
-			case SIGINT:
-			case SIGQUIT:
-			case SIGKILL:
-				rc = 0;
-				break;
-			default:
-				break;
-			}
-		}
-	}
-
-	xfree(desc.clusters);
+	rc = _setup_return(status, rc_pid);
 	return rc;
 }
 
-int main_jobpack(int argc, char *argv[])
+static int main_jobpack(int argc, char *argv[])
 {
 	log_options_t logopt = LOG_OPTS_STDERR_ONLY;
 	job_desc_msg_t desc;
 	resource_allocation_response_msg_t *alloc;
 	time_t before, after;
 	allocation_msg_thread_t *msg_thr = NULL;
-	char **env = NULL, *cluster_name;
+	char **env = NULL;
 	int status = 0;
 	int retries = 0;
-	pid_t pid  = getpid();
-	pid_t tpgid = 0;
 	pid_t rc_pid = 0;
-	int i, rc = 0;
+	int rc = 0;
 	int job_index;
 	static char *msg = "Slurm job queue full, sleeping and retrying.";
-	slurm_allocation_callbacks_t callbacks;
 	int numpacklen = 0;
 	int hostlist_num;
 	int pack_tot_ntasks = 0;
@@ -824,135 +898,17 @@ int main_jobpack(int argc, char *argv[])
 			exit(error_exit);
 		}
 
-		/* reinit log with new verbosity (if changed by command line) */
-		if (opt.verbose || opt.quiet) {
-		        logopt.stderr_level += opt.verbose;
-			logopt.stderr_level -= opt.quiet;
-			logopt.prefix_level = 1;
-			log_alter(logopt, 0, NULL);
-		}
-
-		if (spank_init_post_opt() < 0) {
-			error("Plugin stack post-option processing failed");
-			exit(error_exit);
-		}
-
-		_set_spank_env();
-		_set_submit_dir_env();
-
-		if (opt.cwd && chdir(opt.cwd)) {
-			error("chdir(%s): %m", opt.cwd);
-			exit(error_exit);
-		}
-
-		if (opt.get_user_env_time >= 0) {
-			char *user = uid_to_string(opt.uid);
-			if (strcmp(user, "nobody") == 0) {
-				error("Invalid user id %u: %m",
-				      (uint32_t)opt.uid);
-				exit(error_exit);
-			}
-			env = env_array_user_default(user,
-					     opt.get_user_env_time,
-					     opt.get_user_env_mode);
-			xfree(user);
-			if (env == NULL)
-				exit(error_exit);    /* error already logged */
-			_set_rlimits(env);
-			copy_env(&pack_job_env[group_number].env, env);
-		}
-
-		/*
-		 * Job control for interactive salloc sessions: only if ...
-		 *
-		 * a) input is from a terminal (stdin has valid termios
-		      attributes),
-		 * b) controlling terminal exists (non-negative tpgid),
-		 * c) salloc is not run in allocation-only (--no-shell) mode,
-		 * NOTE: d and e below are configuration dependent
-		 * d) salloc runs in its own process group (true in interactive
-		 *    shells that support job control),
-		 * e) salloc has been configured at compile-time to support
-		      background
-		 *    execution and is not currently in the background process
-		      group.
-		 */
-		if (tcgetattr(STDIN_FILENO, &saved_tty_attributes) < 0) {
-		        /*
-			 * Test existence of controlling terminal (tpgid > 0)
-			 * after first making sure stdin is not redirected.
-			 */
-		} else if ((tpgid = tcgetpgrp(STDIN_FILENO)) < 0) {
-#ifdef HAVE_ALPS_CRAY
-			verbose("no controlling terminal");
-#else
-			if (!opt.no_shell) {
-			  error("no controlling terminal: please set --no-shell");
-			  exit(error_exit);
-			}
-#endif
-#ifdef SALLOC_RUN_FOREGROUND
-		} else if ((!opt.no_shell) && (pid == getpgrp())) {
-		        if (tpgid == pid)
-			        is_interactive = true;
-			while (tcgetpgrp(STDIN_FILENO) != pid) {
-			        if (!is_interactive) {
-				  error("Waiting for program to be placed in "
-					"the foreground");
-				  is_interactive = true;
-				}
-				killpg(pid, SIGTTIN);
-			}
-		}
-#else
-	        } else if ((!opt.no_shell) &&
-			   (getpgrp() == tcgetpgrp(STDIN_FILENO))) {
-			is_interactive = true;
-		}
-#endif
-	        /*
-		 * Reset saved tty attributes at exit, in case a child
-		 * process died before properly resetting terminal.
-		 */
-		if (is_interactive)
-			atexit (_reset_input_mode);
-
-		/*
-		 * Request a job allocation
-		 */
 		slurm_init_job_desc_msg(&desc);
-		if (_fill_job_desc_from_opts(&desc) == -1) {
-			exit(error_exit);
-		}
+		_setup_job(msg_thr, &desc, env, logopt);
+
 		desc.group_number = group_number;
 		desc.numpack = pack_desc_count;
 
-		if (opt.gid != (gid_t) -1) {
-			if (setgid(opt.gid) < 0) {
-				error("setgid: %m");
-				exit(error_exit);
-			}
-		}
-		callbacks.ping = _ping_handler;
-		callbacks.timeout = _timeout_handler;
-		callbacks.job_complete = _job_complete_handler;
-		callbacks.job_suspend = _job_suspend_handler;
-		callbacks.user_msg = _user_msg_handler;
-		callbacks.node_fail = _node_fail_handler;
-
-		/* create message thread to handle pings and such from
-		 * slurmctld */
-		msg_thr = slurm_allocation_msg_thr_create(&desc.other_port,
-							  &callbacks);
-
-		/* NOTE: Do not process signals in separate pthread. The signal
-		 * will cause slurm_allocate_resources_blocking() to exit
-		 * immediately. */
-		for (i = 0; sig_array[i]; i++)
-			xsignal(sig_array[i], _signal_while_allocating);
-
 		before = time(NULL);
 		retries = 0;
+		/*
+		* Request a job allocation
+		*/
 		if (packjob == true) {
 			while ((alloc =
 				slurm_allocate_resources_callback(
@@ -995,32 +951,9 @@ int main_jobpack(int argc, char *argv[])
 		copy_job_desc_msg(pack_job_env[group_number].desc, &desc);
 	}
 
-	/* become the user after the allocation has been requested. */
-	if (opt.uid != (uid_t) -1) {
-		if (setuid(opt.uid) < 0) {
-			error("setuid: %m");
-			exit(error_exit);
-		}
-	}
-	if (alloc == NULL) {
-		if (allocation_interrupted) {
-			/* cancelled by signal */
-			info("Job aborted due to signal");
-		} else if (errno == EINTR) {
-			error("Interrupted by signal."
-			      "  Allocation request rescinded.");
-		} else if (opt.immediate &&
-			   ((errno == ETIMEDOUT) ||
-			    (errno == ESLURM_NOT_TOP_PRIORITY) ||
-			    (errno == ESLURM_NODES_BUSY))) {
-			error("Unable to allocate resources: %m");
-			error_exit = immediate_exit;
-		} else {
-			error("Job submit/allocate failed: %m");
-		}
-		slurm_allocation_msg_thr_destroy(msg_thr);
-		exit(error_exit);
-	} else if (!allocation_interrupted) {
+	_become_user(alloc, msg_thr);
+
+	if (!allocation_interrupted) {
 		/*
 		 * Allocation granted!
 		 */
@@ -1095,42 +1028,11 @@ int main_jobpack(int argc, char *argv[])
 
 		copy_alloc_struct(pack_job_env[group_number].alloc, alloc);
 
-		/*
-		 * Run the user's command.
-		 */
 		if (env_array_for_job(&env, alloc, &desc) != SLURM_SUCCESS)
 			goto relinquish;
 
-		/* Add default task count for srun, if not already set */
-		if (opt.ntasks_set) {
-			env_array_append_fmt(&env, "SLURM_NTASKS", "%d",
-					     opt.ntasks);
-			/* keep around for old scripts */
-			env_array_append_fmt(&env, "SLURM_NPROCS", "%d",
-					     opt.ntasks);
-		}
+		_set_opts(&env, alloc);
 		pack_tot_ntasks += opt.ntasks;
-		if (opt.cpus_set) {
-		  env_array_append_fmt(&env, "SLURM_CPUS_PER_TASK", "%d",
-				       opt.cpus_per_task);
-		}
-		if (opt.overcommit) {
-			env_array_append_fmt(&env, "SLURM_OVERCOMMIT", "%d",
-					     opt.overcommit);
-		}
-		if (opt.acctg_freq) {
-			env_array_append_fmt(&env, "SLURM_ACCTG_FREQ", "%s",
-					     opt.acctg_freq);
-		}
-		if (opt.network)
-			env_array_append_fmt(&env, "SLURM_NETWORK", "%s",
-					     opt.network);
-		cluster_name = slurm_get_cluster_name();
-		if (cluster_name) {
-			env_array_append_fmt(&env, "SLURM_CLUSTER_NAME", "%s",
-					     cluster_name);
-			xfree(cluster_name);
-		}
 
 		xstrfmtcat(aggr_jobidptr, "%d", alloc->job_id);
 		if (group_number < (pack_desc_count - 1))
@@ -1211,78 +1113,16 @@ int main_jobpack(int argc, char *argv[])
 
 	/* End new ENVs for jobpack */
 
-	pthread_mutex_lock(&allocation_state_lock);
-	if (allocation_state == REVOKED) {
-		error("Allocation was revoked for job %u before command could "
-		      "be run", alloc->job_id);
-		pthread_cond_broadcast(&allocation_state_cond);
-		pthread_mutex_unlock(&allocation_state_lock);
-		if (slurm_complete_job(alloc->job_id, status) != 0) {
-			error("Unable to clean up allocation for job %u: %m",
-			      alloc->job_id);
-		}
-		return 1;
-	}
-	allocation_state = GRANTED;
-	pthread_cond_broadcast(&allocation_state_cond);
-	pthread_mutex_unlock(&allocation_state_lock);
-
-	/*  Ensure that salloc has initial terminal foreground control.  */
-	if (is_interactive) {
-		/*
-		 * Ignore remaining job-control signals (other than those in
-		 * sig_array, which at this state act like SIG_IGN).
-		 */
-		xsignal(SIGTSTP, SIG_IGN);
-		xsignal(SIGTTIN, SIG_IGN);
-		xsignal(SIGTTOU, SIG_IGN);
-
-		pid = getpid();
-		setpgid(pid, pid);
-
-		tcsetpgrp(STDIN_FILENO, pid);
-	}
-
-	pthread_mutex_lock(&allocation_state_lock);
-	if (suspend_flag)
-		pthread_cond_wait(&allocation_state_cond,
-				  &allocation_state_lock);
-	command_pid = _fork_command(command_argv);
-	pthread_cond_broadcast(&allocation_state_cond);
-	pthread_mutex_unlock(&allocation_state_lock);
-
-	/*
-	 * Wait for command to exit, OR for waitpid to be interrupted by a
-	 * signal.  Either way, we are going to release the allocation next.
-	 */
-	if (command_pid > 0) {
-		setpgid(command_pid, command_pid);
-		if (is_interactive)
-			tcsetpgrp(STDIN_FILENO, command_pid);
-
-		/* NOTE: Do not process signals in separate pthread.
-		 * The signal will cause waitpid() to exit immediately. */
-		xsignal(SIGHUP,  _exit_on_signal);
-		/* Use WUNTRACED to treat stopped children like terminated
-		 * ones */
-		do {
-			rc_pid = waitpid(command_pid, &status, WUNTRACED);
-		} while (WIFSTOPPED(status) || ((rc_pid == -1) &&
-			 (!exit_flag)));
-		if ((rc_pid == -1) && (errno != EINTR))
-			error("waitpid for %s failed: %m", command_argv[0]);
-	}
-
-	if (is_interactive)
-		tcsetpgrp(STDIN_FILENO, pid);
-
+	rc = _run_command(alloc, status, rc_pid );
+	if (rc)
+		return rc;
+relinquish:
 	/*
 	 * Relinquish the job allocation (if not already revoked).
 	 */
-relinquish:
-	pthread_mutex_lock(&allocation_state_lock);
+	slurm_mutex_lock(&allocation_state_lock);
 	if (allocation_state != REVOKED) {
-		pthread_mutex_unlock(&allocation_state_lock);
+		slurm_mutex_unlock(&allocation_state_lock);
 		for (group_number = 0; group_number < pack_desc_count;
 		     group_number++) {
 			copy_alloc_struct(alloc,
@@ -1293,45 +1133,16 @@ relinquish:
 				error("Unable to clean up job allocation %u: "
 				      "%m", alloc->job_id);
 		}
-		pthread_mutex_lock(&allocation_state_lock);
+		slurm_mutex_lock(&allocation_state_lock);
 		allocation_state = REVOKED;
 	}
 	pthread_cond_broadcast(&allocation_state_cond);
-	pthread_mutex_unlock(&allocation_state_lock);
+	slurm_mutex_unlock(&allocation_state_lock);
 
 	slurm_free_resource_allocation_response_msg(alloc);
 	slurm_allocation_msg_thr_destroy(msg_thr);
 
-	/*
-	 * Figure out what return code we should use.  If the user's command
-	 * exited normally, return the user's return code.
-	 */
-	rc = 1;
-	if (rc_pid != -1) {
-
-		if (WIFEXITED(status)) {
-			rc = WEXITSTATUS(status);
-		} else if (WIFSTOPPED(status)) {
-			/* Terminate stopped child process */
-			_forward_signal(SIGKILL);
-		} else if (WIFSIGNALED(status)) {
-			verbose("Command \"%s\" was terminated by signal %d",
-				command_argv[0], WTERMSIG(status));
-			/* if we get these signals we return a normal
-			 * exit since this was most likely sent from the
-			 * user */
-			switch(WTERMSIG(status)) {
-			case SIGHUP:
-			case SIGINT:
-			case SIGQUIT:
-			case SIGKILL:
-				rc = 0;
-				break;
-			default:
-				break;
-			}
-		}
-	}
+	rc = _setup_return(status, rc_pid);
 	return rc;
 }
 
