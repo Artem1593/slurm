@@ -6,6 +6,8 @@
  *  Copyright (C) 2002-2007 The Regents of the University of California.
  *  Copyright (C) 2008-2010 Lawrence Livermore National Security.
  *  Portions Copyright (C) 2010-2015 SchedMD <http://www.schedmd.com>.
+ *  Portions related to job_pack copyright (C) 2015 Atos Inc.
+ *  		Written by Rod Schultz <rod.schultz@atos.net>.
  *  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
  *  Written by Morris Jette <jette1@llnl.gov>
  *  CODE-OCEC-09-009. All rights reserved.
@@ -508,7 +510,6 @@ void delete_job_details(struct job_record *job_entry)
 	FREE_NULL_LIST(job_entry->details->depend_list);
 	xfree(job_entry->details->dependency);
 	xfree(job_entry->details->orig_dependency);
-	xfree(job_entry->details->pack_group);
 	for (i=0; i<job_entry->details->env_cnt; i++)
 		xfree(job_entry->details->env_sup[i]);
 	xfree(job_entry->details->env_sup);
@@ -1187,6 +1188,7 @@ static void _dump_job_state(struct job_record *dump_job_ptr, Buf buffer)
 
 	pack16(dump_job_ptr->alloc_resp_port, buffer);
 	pack16(dump_job_ptr->other_port, buffer);
+	pack32(dump_job_ptr->pack_leader, buffer);
 	pack8(dump_job_ptr->power_flags, buffer);
 	pack16(dump_job_ptr->start_protocol_ver, buffer);
 	packdouble(dump_job_ptr->billable_tres, buffer);
@@ -1271,6 +1273,7 @@ static int _load_job_state(Buf buffer, uint16_t protocol_version)
 	uint64_t db_index;
 	uint32_t job_id, user_id, group_id, time_limit, priority, alloc_sid;
 	uint32_t exit_code, assoc_id, name_len, time_min, uint32_tmp;
+	uint32_t pack_leader;
 	uint32_t next_step_id, total_cpus, total_nodes = 0, cpu_cnt;
 	uint32_t resv_id, spank_job_env_size = 0, qos_id, derived_ec = 0;
 	uint32_t array_job_id = 0, req_switch = 0, wait4switch = 0;
@@ -1614,6 +1617,7 @@ static int _load_job_state(Buf buffer, uint16_t protocol_version)
 
 		safe_unpack16(&alloc_resp_port, buffer);
 		safe_unpack16(&other_port, buffer);
+		safe_unpack32(&pack_leader, buffer);
 		safe_unpack8(&power_flags, buffer);
 		safe_unpack16(&start_protocol_ver, buffer);
 		safe_unpackdouble(&billable_tres, buffer);
@@ -2030,6 +2034,7 @@ static int _load_job_state(Buf buffer, uint16_t protocol_version)
 		nodes_completing = NULL;  /* reused, nothing left to free */
 	}
 	job_ptr->other_port   = other_port;
+	job_ptr->pack_leader  = pack_leader;
 	job_ptr->power_flags  = power_flags;
 	xfree(job_ptr->partition);
 	job_ptr->partition    = partition;
@@ -2316,7 +2321,6 @@ void _dump_job_details(struct job_details *detail_ptr, Buf buffer)
 	packstr(detail_ptr->features,   buffer);
 	packstr(detail_ptr->dependency, buffer);
 	packstr(detail_ptr->orig_dependency, buffer);
-	packstr(detail_ptr->pack_group, buffer);
 
 	packstr(detail_ptr->std_err,       buffer);
 	packstr(detail_ptr->std_in,        buffer);
@@ -2337,7 +2341,7 @@ static int _load_job_details(struct job_record *job_ptr, Buf buffer,
 {
 	char *acctg_freq = NULL, *req_nodes = NULL, *exc_nodes = NULL;
 	char *features = NULL, *cpu_bind = NULL, *dependency = NULL;
-	char *orig_dependency = NULL, *pack_group, *mem_bind;
+	char *orig_dependency = NULL, *mem_bind;
 	char *err = NULL, *in = NULL, *out = NULL, *work_dir = NULL;
 	char *ckpt_dir = NULL, *restart_dir = NULL;
 	char **argv = (char **) NULL, **env_sup = (char **) NULL;
@@ -2518,7 +2522,6 @@ static int _load_job_details(struct job_record *job_ptr, Buf buffer,
 		safe_unpackstr_xmalloc(&features,   &name_len, buffer);
 		safe_unpackstr_xmalloc(&dependency, &name_len, buffer);
 		safe_unpackstr_xmalloc(&orig_dependency, &name_len, buffer);
-		safe_unpackstr_xmalloc(&pack_group, &name_len, buffer);
 
 		safe_unpackstr_xmalloc(&err, &name_len, buffer);
 		safe_unpackstr_xmalloc(&in,  &name_len, buffer);
@@ -2562,7 +2565,6 @@ static int _load_job_details(struct job_record *job_ptr, Buf buffer,
 	xfree(job_ptr->details->cpu_bind);
 	xfree(job_ptr->details->dependency);
 	xfree(job_ptr->details->orig_dependency);
-	xfree(job_ptr->details->pack_group);
 	xfree(job_ptr->details->std_err);
 	for (i=0; i<job_ptr->details->env_cnt; i++)
 		xfree(job_ptr->details->env_sup[i]);
@@ -2592,7 +2594,6 @@ static int _load_job_details(struct job_record *job_ptr, Buf buffer,
 	job_ptr->details->cpus_per_task = cpus_per_task;
 	job_ptr->details->dependency = dependency;
 	job_ptr->details->orig_dependency = orig_dependency;
-	job_ptr->details->pack_group = pack_group;
 	job_ptr->details->env_cnt = env_cnt;
 	job_ptr->details->env_sup = env_sup;
 	job_ptr->details->std_err = err;
@@ -2638,7 +2639,6 @@ unpack_error:
 	xfree(cpu_bind);
 	xfree(dependency);
 	xfree(orig_dependency);
-	xfree(pack_group);
 /*	for (i=0; i<env_cnt; i++)
 	xfree(env_sup[i]);  Don't trust this on unpack error */
 	xfree(env_sup);
@@ -3678,8 +3678,8 @@ void dump_job_desc(job_desc_msg_t * job_specs)
 	debug3("   resp_host=%s alloc_resp_port=%u other_port=%u",
 	       job_specs->resp_host,
 	       job_specs->alloc_resp_port, job_specs->other_port);
-	debug3("   dependency=%s pack_group=%s account=%s qos=%s comment=%s",
-	       job_specs->dependency, job_specs->pack_group, job_specs->account,
+	debug3("   dependency=%s account=%s qos=%s comment=%s",
+	       job_specs->dependency, job_specs->account,
 	       job_specs->qos, job_specs->comment);
 
 	num_tasks = (job_specs->num_tasks != NO_VAL) ?
@@ -3965,7 +3965,6 @@ extern struct job_record *job_array_split(struct job_record *job_ptr)
 	details_new->depend_list = depended_list_copy(job_details->depend_list);
 	details_new->dependency = xstrdup(job_details->dependency);
 	details_new->orig_dependency = xstrdup(job_details->orig_dependency);
-	details_new->pack_group = xstrdup(job_details->pack_group);
 	if (job_details->env_cnt) {
 		details_new->env_sup =
 			xmalloc(sizeof(char *) * (job_details->env_cnt + 1));
@@ -4649,23 +4648,22 @@ static int _job_signal(struct job_record *job_ptr, uint16_t signal,
  * IN preempt - true if job being preempted
  * RET 0 on success, otherwise ESLURM error code
  */
-static int _kill_job_pack(uint32_t job_id, struct job_record *job_ptr,
+static int _kill_job_pack(uint32_t pack_id, struct job_record *job_ptr,
 		uint16_t signal, uint16_t flags, uid_t uid, bool preempt)
 {
 	ListIterator dep_iter;
 	struct depend_spec *dep_ptr;
-	struct job_record *mbr_ptr;
+	struct job_record *pack_ptr, *mbr_ptr;
 	uint64_t debug_flags;
-
 	debug_flags = slurm_get_debug_flags();
-
-	if (job_ptr->details == NULL
-			|| (job_ptr->details->depend_list == NULL)) {
-		/* Shouldn't happen */
+	pack_ptr = find_job_record(pack_id);
+	if ((pack_ptr == NULL)
+	    || (pack_ptr->details == NULL)
+	    || (pack_ptr->details->depend_list == NULL)) {
 		return _job_signal(job_ptr, signal, flags, uid, preempt);
 	}
 
-	dep_iter = list_iterator_create(job_ptr->details->depend_list);
+	dep_iter = list_iterator_create(pack_ptr->details->depend_list);
 	dep_ptr = (struct depend_spec *) list_next(dep_iter);
 	while (dep_ptr != NULL) {
 		mbr_ptr = dep_ptr->job_ptr;
@@ -4673,8 +4671,7 @@ static int _kill_job_pack(uint32_t job_id, struct job_record *job_ptr,
 		    && !IS_JOB_FINISHED(mbr_ptr)) {
 			if (debug_flags & DEBUG_FLAG_JOB_PACK) {
 				info("JPCK: kill job_pack -- member=%d "
-				     "leader=%d", dep_ptr->job_id,
-				     job_ptr->job_id);
+				     "leader=%d", dep_ptr->job_id, pack_id);
 			}
 			_job_signal(mbr_ptr, signal, flags, uid, preempt);
 		}
@@ -4684,13 +4681,11 @@ static int _kill_job_pack(uint32_t job_id, struct job_record *job_ptr,
 
 	if (debug_flags & DEBUG_FLAG_JOB_PACK) {
 		info("JPCK: kill job_pack --leader=%d org_job_signalled=%d",
-		      job_ptr->job_id, job_id);
+		      pack_id, job_ptr->job_id);
 	}
-	if (IS_JOB_COMPLETING(job_ptr))
+	if (IS_JOB_COMPLETING(pack_ptr) || IS_JOB_FINISHED(pack_ptr))
 		return ESLURM_ALREADY_DONE;
-	if (IS_JOB_FINISHED(job_ptr))
-		return ESLURM_ALREADY_DONE;
-	return _job_signal(job_ptr, signal, flags, uid, preempt);
+	return _job_signal(pack_ptr, signal, flags, uid, preempt);
 }
 
 /*
@@ -4706,10 +4701,6 @@ extern int job_signal(uint32_t job_id, uint16_t signal, uint16_t flags,
 		      uid_t uid, bool preempt)
 {
 	struct job_record *job_ptr;
-	ListIterator dep_iter;
-	struct depend_spec *dep_ptr;
-	struct job_record *ldr_ptr;
-	uint32_t ldr_id;;
 
 	/* Jobs submitted using Moab command should be cancelled using
 	 * Moab command for accurate job records */
@@ -4753,35 +4744,10 @@ extern int job_signal(uint32_t job_id, uint16_t signal, uint16_t flags,
 	 * job_step_kill_msg
 	 */
 
-	if ((signal == SIGKILL)
-	    && (job_ptr->details != NULL)
-	    && (job_ptr->details->depend_list != NULL)) {
-		/* Could  be a job_pack */
-		dep_iter = list_iterator_create(job_ptr->details->depend_list);
-		dep_ptr = (struct depend_spec *) list_next(dep_iter);
-		if (dep_ptr != NULL
-		    && dep_ptr->depend_type == SLURM_DEPEND_PACKLEADER) {
-			/* Pack leader, have to kill members too */
-			list_iterator_destroy(dep_iter);
-			return _kill_job_pack(job_id, job_ptr, signal, flags,
-					      uid, preempt);
-		}
-		if (dep_ptr != NULL
-		    && dep_ptr->depend_type == SLURM_DEPEND_PACK) {
-			/* Pack member, have to kill members too */
-			list_iterator_destroy(dep_iter);
-			ldr_id = dep_ptr->pack_leader;
-			ldr_ptr = find_job_record(ldr_id);
-			if (ldr_ptr) {
-				return _kill_job_pack(job_id, ldr_ptr, signal,
-						      flags, uid, preempt);
-			} else {
-				debug2("JPCK: job_signal_pack -- no job rec for"
-				     " leader=%d of member %d", ldr_id, job_id);
-				return SLURM_FAILURE;
-			}
-		}
-		list_iterator_destroy(dep_iter);
+	if ((signal == SIGKILL) && (job_ptr->pack_leader != 0)) {
+		/* Is a job_pack, kill all the members, including the leader */
+		return _kill_job_pack(job_ptr->pack_leader, job_ptr, signal,
+				      flags, uid, preempt);
 	}
 	return _job_signal(job_ptr, signal, flags, uid, preempt);
 }
@@ -5353,8 +5319,7 @@ extern int job_complete(uint32_t job_id, uid_t uid, bool requeue,
 {
 	int rc;
 	bool isleader = false;
-	List pack_depend;
-	ListIterator depend_iter;
+	ListIterator dpnd_iter;
 	struct depend_spec *ldr_dep_ptr;
 	struct job_record *job_ptr;
 	struct job_record *mbr_job;
@@ -5373,66 +5338,51 @@ extern int job_complete(uint32_t job_id, uid_t uid, bool requeue,
 	/*
 	 * Check for a job_pack leader. If found, complete members too.
 	 */
-	if (job_ptr->details != NULL) {
-		pack_depend = job_ptr->details->depend_list;
-		if (pack_depend) {
-			depend_iter = list_iterator_create(pack_depend);
-			while ((ldr_dep_ptr = (struct depend_spec *)
-					list_next(depend_iter))) {
-				if (ldr_dep_ptr->depend_type ==
-							SLURM_DEPEND_PACK) {
-					if (debug_flags & DEBUG_FLAG_JOB_PACK) {
-						info("JPCK: not completing"
-						     "pack %d, will wait for "
-						     "it's leader",
-						     ldr_dep_ptr->job_id);
-					}
-					return SLURM_SUCCESS;
-				}
-				if (ldr_dep_ptr->depend_type !=
-							SLURM_DEPEND_PACKLEADER)
-					continue;
-				isleader = true;
-				mbr_job = ldr_dep_ptr->job_ptr;
-				/*
-				 * job_ptr is a pack leader.
-				 * mbr_job is one of its members,
-				 *         complete mbr_job
-				 */
-				if (mbr_job->job_state == JOB_COMPLETE
-				    || mbr_job->job_state == JOB_COMPLETING) {
-					if (debug_flags & DEBUG_FLAG_JOB_PACK) {
-						info("JPCK: skipping pack "
-						     "member %d, (already "
-						     "complete)",
-						     ldr_dep_ptr->job_id);
-					}
-					continue;
-				}
+	if (job_ptr->details != NULL && job_ptr->details->depend_list!=NULL) {
+		dpnd_iter = list_iterator_create(job_ptr->details->depend_list);
+		while ((ldr_dep_ptr = (struct depend_spec *)
+				      list_next(dpnd_iter))) {
+			if (ldr_dep_ptr->depend_type == SLURM_DEPEND_PACK) {
 				if (debug_flags & DEBUG_FLAG_JOB_PACK) {
-					info("JPCK: Completing pack member "
-					     "jobid=%d", ldr_dep_ptr->job_id);
+					info("JPCK: pack member %d waiting for "
+					     "leader %d to complete",
+					     job_id, job_ptr->pack_leader);
 				}
-				rc = _job_complete(ldr_dep_ptr->job_id, uid,
-							  false, false,
-							  job_return_code);
-
-				if ((debug_flags & DEBUG_FLAG_JOB_PACK)
-				    && (rc != SLURM_SUCCESS)) {
-					if (rc == ESLURM_ALREADY_DONE) {
-						info("JPCK: pack job %d is "
-						      "already complete",
-						      ldr_dep_ptr->job_id);
-
-					} else {
-						info("JPCK: Failed to complete "
-						      "pack job %d",
-						      ldr_dep_ptr->job_id);
-					}
+				return SLURM_SUCCESS;
+			}
+			if (ldr_dep_ptr->depend_type != SLURM_DEPEND_PACKLEADER)
+				continue;
+			isleader = true;
+			mbr_job = ldr_dep_ptr->job_ptr;
+			/* job_ptr is a pack leader.
+			 * mbr_job is one of its members, complete mbr_job */
+			if (mbr_job->job_state == JOB_COMPLETE
+			    || mbr_job->job_state == JOB_COMPLETING) {
+				if (debug_flags & DEBUG_FLAG_JOB_PACK) {
+					info("JPCK: skipping pack member %d, "
+					     "(already complete)",
+					     ldr_dep_ptr->job_id);
+				}
+				continue;
+			}
+			if (debug_flags & DEBUG_FLAG_JOB_PACK) {
+				info("JPCK: Completing pack member jobid=%d",
+				     ldr_dep_ptr->job_id);
+			}
+			rc = _job_complete(ldr_dep_ptr->job_id, uid,
+					   false, false, job_return_code);
+			if ((debug_flags & DEBUG_FLAG_JOB_PACK)
+			    && (rc != SLURM_SUCCESS)) {
+				if (rc == ESLURM_ALREADY_DONE) {
+					info("JPCK: pack job %d is already "
+					     "complete", ldr_dep_ptr->job_id);
+				} else {
+					info("JPCK: Failed to complete pack "
+					     "job %d", ldr_dep_ptr->job_id);
 				}
 			}
-			list_iterator_destroy(depend_iter);
 		}
+		list_iterator_destroy(dpnd_iter);
 		if (isleader) {
 			if (job_ptr->job_state == JOB_COMPLETE
 			    || job_ptr->job_state == JOB_COMPLETING) {
@@ -6744,7 +6694,6 @@ static int _test_job_desc_fields(job_desc_msg_t * job_desc)
 	    _test_strlen(job_desc->std_err, "std_err", MAXPATHLEN)	||
 	    _test_strlen(job_desc->std_in, "std_in", MAXPATHLEN)	||
 	    _test_strlen(job_desc->std_out, "std_out", MAXPATHLEN)	||
-	    _test_strlen(job_desc->pack_group, "pack_group", 1024*128)	||
 	    _test_strlen(job_desc->wckey, "wckey", 1024)		||
 	    _test_strlen(job_desc->work_dir, "work_dir", MAXPATHLEN))
 		return ESLURM_PATHNAME_TOO_LONG;
@@ -7533,6 +7482,7 @@ _copy_job_desc_to_job_record(job_desc_msg_t * job_desc,
 	job_ptr->resp_host = xstrdup(job_desc->resp_host);
 	job_ptr->alloc_resp_port = job_desc->alloc_resp_port;
 	job_ptr->other_port = job_desc->other_port;
+	job_ptr->pack_leader = job_desc->pack_leader;
 	job_ptr->power_flags = job_desc->power_flags;
 	job_ptr->time_last_active = time(NULL);
 	job_ptr->cr_enabled = 0;
@@ -7662,9 +7612,6 @@ _copy_job_desc_to_job_record(job_desc_msg_t * job_desc,
 	if (job_desc->work_dir)
 		detail_ptr->work_dir = xstrdup(job_desc->work_dir);
 
-	if (job_desc->pack_group) {
-		detail_ptr->pack_group = xstrdup(job_desc->pack_group);
-	}
 	if (job_desc->begin_time > time(NULL))
 		detail_ptr->begin_time = job_desc->begin_time;
 	job_ptr->select_jobinfo =
@@ -12029,9 +11976,6 @@ static int _update_job(struct job_record *job_ptr, job_desc_msg_t * job_specs,
 	if (error_code != SLURM_SUCCESS)
 		goto fini;
 
-	if (job_specs->pack_group) {
-		job_ptr->details->pack_group = job_specs->pack_group;
-	}
 	if (job_specs->begin_time) {
 		if (IS_JOB_PENDING(job_ptr) && detail_ptr) {
 			char time_str[32];
@@ -15725,7 +15669,6 @@ _copy_job_record_to_job_desc(struct job_record *job_ptr)
 	job_desc->cpu_freq_gov      = details->cpu_freq_gov;
 	job_desc->deadline          = job_ptr->deadline;
 	job_desc->dependency        = xstrdup(details->dependency);
-	job_desc->pack_group        = xstrdup(details->pack_group);
 	job_desc->end_time          = 0; /* Unused today */
 	job_desc->environment       = get_job_env(job_ptr,
 						  &job_desc->env_size);
@@ -15748,6 +15691,7 @@ _copy_job_record_to_job_desc(struct job_record *job_ptr)
 	job_desc->num_tasks         = details->num_tasks;
 	job_desc->open_mode         = details->open_mode;
 	job_desc->other_port        = job_ptr->other_port;
+	job_desc->pack_leader       = job_ptr->pack_leader;
 	job_desc->power_flags       = job_ptr->power_flags;
 	job_desc->overcommit        = details->overcommit;
 	job_desc->partition         = xstrdup(job_ptr->partition);
