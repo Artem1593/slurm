@@ -1003,7 +1003,7 @@ cleanup:
 
 	mpir_cleanup();
 	log_fini();
-	//info("******** MNP pid=%d: exiting fini_srun", getpid());
+	//debug("******** MNP pid=%d: exiting fini_srun", getpid());
 }
 
 void
@@ -1680,7 +1680,7 @@ static int _set_umask_env(void)
 static void _shepherd_notify(int shepherd_fd)
 {
 	int rc;
-	//info("******** MNP pid=%d, entering _shepard_notify, shepard_fd=%d", getpid(), shepard_fd);
+	//debug("******** MNP pid=%d, entering _shepard_notify, shepard_fd=%d", getpid(), shepard_fd);
 
 	while (1) {
 		rc = write(shepherd_fd, "", 1);
