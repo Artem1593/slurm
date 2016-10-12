@@ -1041,7 +1041,6 @@ CPPFLAGS
 CCC
 CC
 CFLAGS
-LT_SYS_LIBRARY_PATH
 CPP
 CXXCPP
 PKG_CONFIG
@@ -1780,8 +1779,6 @@ Some influential environment variables:
               you have headers in a nonstandard directory <include dir>
   CC          C compiler command
   CFLAGS      C compiler flags
-  LT_SYS_LIBRARY_PATH
-              User-defined run-time library search path.
   CPP         C preprocessor
   CXXCPP      C++ preprocessor
   PKG_CONFIG  path to pkg-config utility
