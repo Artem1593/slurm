@@ -101,8 +101,6 @@ typedef struct allocation_info {
 	uint32_t                stepid;
 } allocation_info_t;
 
-static int shepherd_fd = -1;
-
 extern uint32_t pack_desc_count;
 extern uint32_t group_index;
 extern uint32_t job_index;
@@ -726,7 +724,8 @@ extern void create_srun_job(srun_job_t **p_job, bool *got_alloc,
 		 * Spawn process to insure clean-up of job and/or step
 		 * on abnormal termination
 		 */
-		shepherd_fd = _shepherd_spawn(job, *got_alloc);
+		opt.shepherd_fd = -1;
+		opt.shepherd_fd = _shepherd_spawn(job, *got_alloc);
 	}
 
 	*p_job = job;
@@ -828,9 +827,10 @@ extern void create_srun_jobpack(srun_job_t **p_job, bool *got_alloc,
 			* Spawn process to insure clean-up of
 			* job and/or step on abnormal term
 			*/
-			opt.shepard_fd = -1;
-			opt.shepard_fd = _shepard_spawn(job,
-					 *got_alloc);
+		opt.shepherd_fd = -1;
+		opt.shepherd_fd = _shepherd_spawn(job,
+				 *got_alloc);
+			 
 			copy_opt_struct(desc[group_index].pack_job_env[
 					job_index].opt, &opt);
 		}
@@ -916,8 +916,8 @@ extern void create_srun_jobpack(srun_job_t **p_job, bool *got_alloc,
 				* Spawn process to insure clean-up of
 				* job and/or step on abnormal term
 				*/
-				opt.shepard_fd = -1;
-				opt.shepard_fd = _shepard_spawn(job,
+				opt.shepherd_fd = -1;
+				opt.shepherd_fd = _shepherd_spawn(job,
 						 *got_alloc);
 			}
 			/*
@@ -982,8 +982,9 @@ extern void fini_srun(srun_job_t *job, bool got_alloc, uint32_t *global_rc,
 			slurm_complete_job(job->jobid, NO_VAL);
 		else
 			slurm_complete_job(job->jobid, *global_rc);
-	}
-	_shepherd_notify(shepherd_fd);
+		}
+
+	_shepherd_notify(opt.shepherd_fd);
 
 cleanup:
 	if (signal_thread) {
@@ -1799,6 +1800,6 @@ static int _validate_relative(resource_allocation_response_msg_t *resp)
 
 static void _call_spank_fini(void)
 {
-	if (-1 != shepherd_fd)
+	if (-1 != opt.shepherd_fd)
 		spank_fini(NULL);
 }
