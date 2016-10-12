@@ -186,6 +186,7 @@ int slurm_step_launch (slurm_step_ctx_t *ctx,
 	char **env = NULL;
 	char **mpi_env = NULL;
 	int rc = SLURM_SUCCESS;
+
 	debug("Entering slurm_step_launch");
 	memset(&launch, 0, sizeof(launch));
 
@@ -245,7 +246,6 @@ int slurm_step_launch (slurm_step_ctx_t *ctx,
 	launch.pelog_env_size = params->pelog_env_size;
 	launch.cred = ctx->step_resp->cred;
 	launch.job_step_id = ctx->step_resp->job_step_id;
-
 	if (params->env == NULL) {
 		/* if the user didn't specify an environment, grab the
 		 * environment of the running process */
@@ -632,14 +632,13 @@ void slurm_step_launch_wait_finish(slurm_step_ctx_t *ctx)
 
 	sls = ctx->launch_state;
 
-		debug("******** JPCK MNP pid=%d tid=%d entering slurm_step_launch_wait_finish", getpid(), (int)pthread_self());
 	/* Wait for all tasks to complete */
 	slurm_mutex_lock(&sls->lock);
 	while (bit_set_count(sls->tasks_exited) < sls->tasks_requested) {
 		if (!sls->abort) {
 			slurm_cond_wait(&sls->cond, &sls->lock);
 
-		} else {
+=		} else {
 			if (!sls->abort_action_taken) {
 				slurm_kill_job_step(ctx->job_id,
 						    ctx->step_resp->
@@ -747,9 +746,7 @@ void slurm_step_launch_wait_finish(slurm_step_ctx_t *ctx)
 	}
 
 	mpi_hook_client_fini(sls->mpi_state);
-
 	slurm_mutex_unlock(&sls->lock);
-	debug("******** JPCK MNP pid=%d tid=%d exiting slurm_step_launch_wait_finish", getpid(), (int)pthread_self());
 }
 
 /*
@@ -1163,9 +1160,8 @@ _launch_handler(struct step_launch_state *sls, slurm_msg_t *resp)
 			bit_set(sls->tasks_exited, msg->task_ids[i]);
 		}
 	} else {
-		for (i = 0; i < msg->count_of_pids; i++) {
+		for (i = 0; i < msg->count_of_pids; i++)
 			bit_set(sls->tasks_started, msg->task_ids[i]);
-		}
 	}
 	if (sls->callback.task_start != NULL)
 		(sls->callback.task_start)(msg);
@@ -1181,6 +1177,7 @@ _exit_handler(struct step_launch_state *sls, slurm_msg_t *exit_msg)
 	task_exit_msg_t *msg = (task_exit_msg_t *) exit_msg->data;
 	void (*task_finish)(task_exit_msg_t *);
 	int i;
+
 
 	/* Record SIGTERM and SIGKILL termination codes to
 	 * recognize abnormal termination */

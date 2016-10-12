@@ -963,7 +963,6 @@ slurm_sprint_job_info ( job_info_t * job_ptr, int one_liner )
 
 	/****** Line 38 (optional) ******/
 	if (job_ptr->bitflags) {
-
 		xstrcat(out, line_end);
 		if (job_ptr->bitflags & KILL_INV_DEP)
 			xstrcat(out, "KillOInInvalidDependent=Yes");
