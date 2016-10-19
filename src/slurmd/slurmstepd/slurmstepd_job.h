@@ -236,8 +236,9 @@ typedef struct {
 	int		non_smp;	/* Set if task IDs are not monotonically
 					 * increasing across all nodes, set only
 					 * native Cray systems */
-	uint32_t packstepid[2]; 	/* jobid of srun first step of the
-					 * jobpack & stepid of jobpack member */
+	uint32_t packjobid;		/* jobid of srun first step of the
+					 * jobpack */
+	uint32_t packstepid;		/* stepid of jobpack member */
 } stepd_step_rec_t;
 
 
