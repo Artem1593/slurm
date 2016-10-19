@@ -588,6 +588,7 @@ extern void create_srun_job(srun_job_t **p_job, bool *got_alloc,
 			exit(error_exit);
 		}
 		opt.mpi_jobid = opt.jobid;
+		opt.mpi_stepid = 0;
 		if (create_job_step(job, false) < 0) {
 			exit(error_exit);
 		}
@@ -646,6 +647,7 @@ extern void create_srun_job(srun_job_t **p_job, bool *got_alloc,
 			      " are already allocated.");
 		}
 		opt.mpi_jobid = opt.jobid;
+		opt.mpi_stepid = 0;
 		if (!job || create_job_step(job, false) < 0)
 			exit(error_exit);
 	} else {
@@ -702,6 +704,7 @@ extern void create_srun_job(srun_job_t **p_job, bool *got_alloc,
 			info("Warning: Unable to assume uid=%u", opt.uid);
 
 		opt.mpi_jobid = opt.jobid;
+		opt.mpi_stepid = 0;
 		if (!job || create_job_step(job, true) < 0) {
 			slurm_complete_job(resp->job_id, 1);
 			exit(error_exit);
@@ -757,6 +760,7 @@ extern void create_srun_jobpack(srun_job_t **p_job, bool *got_alloc,
 			exit(error_exit);
 		}
 		opt.mpi_jobid = opt.jobid;
+		opt.mpi_stepid = 0;
 		if (create_job_step(job, false) < 0) {
 			exit(error_exit);
 		}

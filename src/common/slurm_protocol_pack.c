@@ -4932,8 +4932,8 @@ pack_job_step_create_request_msg(job_step_create_request_msg_t * msg,
 
 		pack16(msg->relative, buffer);
 		pack32(msg->task_dist, buffer);
-		pack32(msg->packstepid[0], buffer);
-		pack32(msg->packstepid[1], buffer);
+		pack32(msg->packjobid, buffer);
+		pack32(msg->packstepid, buffer);
 		pack16(msg->plane_size, buffer);
 		pack16(msg->port, buffer);
 		pack16(msg->ckpt_interval, buffer);
@@ -5026,8 +5026,8 @@ unpack_job_step_create_request_msg(job_step_create_request_msg_t ** msg,
 
 		safe_unpack16(&(tmp_ptr->relative), buffer);
 		safe_unpack32(&(tmp_ptr->task_dist), buffer);
-		safe_unpack32(&(tmp_ptr->packstepid[0]), buffer);
-		safe_unpack32(&(tmp_ptr->packstepid[1]), buffer);
+		safe_unpack32(&(tmp_ptr->packjobid), buffer);
+		safe_unpack32(&(tmp_ptr->packstepid), buffer);
 		safe_unpack16(&(tmp_ptr->plane_size), buffer);
 		safe_unpack16(&(tmp_ptr->port), buffer);
 		safe_unpack16(&(tmp_ptr->ckpt_interval), buffer);
@@ -10575,6 +10575,7 @@ _pack_launch_tasks_request_msg(launch_tasks_request_msg_t * msg, Buf buffer,
 		pack16(msg->ntasks_per_core, buffer);
 		pack16(msg->ntasks_per_socket, buffer);
 		pack32(msg->mpi_jobid, buffer);
+		pack32(msg->mpi_stepid, buffer);
 		pack32(msg->mpi_ntasks, buffer);
 		pack32(msg->mpi_nnodes, buffer);
 		pack32(msg->mpi_stepfnodeid, buffer);
@@ -10601,8 +10602,8 @@ _pack_launch_tasks_request_msg(launch_tasks_request_msg_t * msg, Buf buffer,
 				     buffer);
 		}
 		pack16(msg->num_resp_port, buffer);
-		pack32(msg->packstepid[0], buffer);
-		pack32(msg->packstepid[1], buffer);
+		pack32(msg->packjobid, buffer);
+		pack32(msg->packstepid, buffer);
 		for (i = 0; i < msg->num_resp_port; i++)
 			pack16(msg->resp_port[i], buffer);
 		slurm_pack_slurm_addr(&msg->orig_addr, buffer);
@@ -10895,6 +10896,7 @@ _unpack_launch_tasks_request_msg(launch_tasks_request_msg_t **
 		safe_unpack16(&msg->ntasks_per_core, buffer);
 		safe_unpack16(&msg->ntasks_per_socket, buffer);
 		safe_unpack32(&msg->mpi_jobid, buffer);
+		safe_unpack32(&msg->mpi_stepid, buffer);
 		safe_unpack32(&msg->mpi_ntasks, buffer);
 		safe_unpack32(&msg->mpi_nnodes, buffer);
 		safe_unpack32(&msg->mpi_stepfnodeid, buffer);
@@ -10929,8 +10931,8 @@ _unpack_launch_tasks_request_msg(launch_tasks_request_msg_t **
 				goto unpack_error;
 		}
 		safe_unpack16(&msg->num_resp_port, buffer);
-		safe_unpack32(&msg->packstepid[0], buffer);
-		safe_unpack32(&msg->packstepid[1], buffer);
+		safe_unpack32(&msg->packjobid, buffer);
+		safe_unpack32(&msg->packstepid, buffer);
 		if (msg->num_resp_port > 0) {
 			msg->resp_port = xmalloc(sizeof(uint16_t) *
 						 msg->num_resp_port);
