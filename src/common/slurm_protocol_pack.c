@@ -9089,6 +9089,7 @@ _pack_job_desc_msg(job_desc_msg_t * job_desc_ptr, Buf buffer,
 		pack32(job_desc_ptr->numpack, buffer);
 		pack32(job_desc_ptr->pack_leader, buffer);
 	} else if (protocol_version >= SLURM_16_05_PROTOCOL_VERSION) {
+		pack32(job_desc_ptr->bitflags, buffer);
 		packstr(job_desc_ptr->clusters, buffer);
 		pack16(job_desc_ptr->contiguous, buffer);
 		pack16(job_desc_ptr->core_spec, buffer);
@@ -9752,6 +9753,21 @@ _unpack_job_desc_msg(job_desc_msg_t ** job_desc_buffer_ptr, Buf buffer,
 
 	/* alloc memory for structure */
 	if (protocol_version >= SLURM_16_05_PROTOCOL_VERSION) {
+		/* These are set so we don't confuse them later for what is
+		 * set in the select_jobinfo structure.
+		 */
+		job_desc_ptr->geometry[0] = (uint16_t)NO_VAL;
+		job_desc_ptr->conn_type[0] = (uint16_t)NO_VAL;
+		job_desc_ptr->rotate = (uint16_t)NO_VAL;
+		job_desc_ptr->blrtsimage = NULL;
+		job_desc_ptr->linuximage = NULL;
+		job_desc_ptr->mloaderimage = NULL;
+		job_desc_ptr->ramdiskimage = NULL;
+		safe_unpack16(&job_desc_ptr->wait_all_nodes, buffer);
+		safe_unpack8(&job_desc_ptr->resv_port, buffer);
+		safe_unpack32(&job_desc_ptr->bitflags, buffer);
+	} else if (protocol_version >= SLURM_15_08_PROTOCOL_VERSION) {
+		uint16_t old_nice = 0;
 		job_desc_ptr = xmalloc(sizeof(job_desc_msg_t));
 		*job_desc_buffer_ptr = job_desc_ptr;
 

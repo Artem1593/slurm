@@ -87,6 +87,7 @@ strong_alias(env_unset_environment,	slurm_env_unset_environment);
 #define ENV_BUFSIZE (256 * 1024)
 #define MAX_ENV_STRLEN (32 * 4096)	/* Needed for CPU_BIND and MEM_BIND on
 					 * SGI systems with huge CPU counts */
+
 static int _setup_particulars(uint32_t cluster_flags,
 			       char ***dest,
 			       dynamic_plugin_data_t *select_jobinfo)
@@ -305,7 +306,6 @@ void unsetenvp(char **env, const char *name)
 	ep = env;
 	while ((ep = _find_name_in_env (ep, name)) && (*ep != NULL)) {
 		char **dp = ep;
-
 		xfree (*ep);
 		do
 			dp[0] = dp[1];
@@ -339,7 +339,6 @@ int setup_env(env_t *env, bool preserve_env)
 	char *dist = NULL, *lllp_dist = NULL;
 	char addrbuf[INET_ADDRSTRLEN];
 	uint32_t cluster_flags = slurmdb_setup_cluster_flags();
-
 
 	if (env == NULL)
 		return SLURM_ERROR;
@@ -1536,7 +1535,6 @@ int env_array_append_fmt(char ***array_ptr, const char *name,
 	va_start(ap, value_fmt);
 	vsnprintf (value, ENV_BUFSIZE, value_fmt, ap);
 	va_end(ap);
-
 	rc = env_array_append(array_ptr, name, value);
 	xfree(value);
 
@@ -1577,7 +1575,6 @@ int env_array_overwrite_fmt(char ***array_ptr, const char *name,
 	va_start(ap, value_fmt);
 	vsnprintf (value, ENV_BUFSIZE, value_fmt, ap);
 	va_end(ap);
-
 	rc = env_array_overwrite(array_ptr, name, value);
 	xfree(value);
 
