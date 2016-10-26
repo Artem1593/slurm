@@ -95,7 +95,6 @@ typedef struct {
 	char *name;
 	char *nodelist;
 	char *node_inx;
-	char *packid;
 	char *partition;
 	char *priority;
 	char *qos;
@@ -233,7 +232,6 @@ static char *job_req_inx[] = {
 	"job_name",
 	"nodelist",
 	"node_inx",
-	"packid",
 	"`partition`",
 	"priority",
 	"id_qos",
@@ -273,7 +271,6 @@ enum {
 	JOB_REQ_NAME,
 	JOB_REQ_NODELIST,
 	JOB_REQ_NODE_INX,
-	JOB_REQ_PACKID,
 	JOB_REQ_PARTITION,
 	JOB_REQ_PRIORITY,
 	JOB_REQ_QOS,
@@ -500,7 +497,6 @@ static int high_buffer_size = (1024 * 1024);
 /* 	xfree(object->name); */
 /* 	xfree(object->nodelist); */
 /* 	xfree(object->node_inx); */
-/*	xfree(object->packid); */
 /* 	xfree(object->partition); */
 /* 	xfree(object->priority); */
 /* 	xfree(object->qos); */
@@ -765,7 +761,6 @@ static void _pack_local_job(local_job_t *object,
 		packstr(object->name, buffer);
 		packstr(object->nodelist, buffer);
 		packstr(object->node_inx, buffer);
-		packstr(object->packid, buffer);
 		packstr(object->partition, buffer);
 		packstr(object->priority, buffer);
 		packstr(object->qos, buffer);
@@ -803,7 +798,6 @@ static void _pack_local_job(local_job_t *object,
 		packstr(object->name, buffer);
 		packstr(object->nodelist, buffer);
 		packstr(object->node_inx, buffer);
-		packstr(object->packid, buffer);
 		packstr(object->partition, buffer);
 		packstr(object->priority, buffer);
 		packstr(object->qos, buffer);
@@ -908,7 +902,6 @@ static int _unpack_local_job(local_job_t *object,
 		unpackstr_ptr(&object->name, &tmp32, buffer);
 		unpackstr_ptr(&object->nodelist, &tmp32, buffer);
 		unpackstr_ptr(&object->node_inx, &tmp32, buffer);
-		unpackstr_ptr(&object->packid, &tmp32, buffer);
 		unpackstr_ptr(&object->partition, &tmp32, buffer);
 		unpackstr_ptr(&object->priority, &tmp32, buffer);
 		unpackstr_ptr(&object->qos, &tmp32, buffer);
@@ -946,7 +939,6 @@ static int _unpack_local_job(local_job_t *object,
 		unpackstr_ptr(&object->name, &tmp32, buffer);
 		unpackstr_ptr(&object->nodelist, &tmp32, buffer);
 		unpackstr_ptr(&object->node_inx, &tmp32, buffer);
-		unpackstr_ptr(&object->packid, &tmp32, buffer);
 		unpackstr_ptr(&object->partition, &tmp32, buffer);
 		unpackstr_ptr(&object->priority, &tmp32, buffer);
 		unpackstr_ptr(&object->qos, &tmp32, buffer);
@@ -2105,7 +2097,6 @@ static Buf _pack_archive_jobs(MYSQL_RES *result, char *cluster_name,
 		job.name = row[JOB_REQ_NAME];
 		job.nodelist = row[JOB_REQ_NODELIST];
 		job.node_inx = row[JOB_REQ_NODE_INX];
-		job.packid = row[JOB_REQ_PACKID];
 		job.partition = row[JOB_REQ_PARTITION];
 		job.priority = row[JOB_REQ_PRIORITY];
 		job.qos = row[JOB_REQ_QOS];
@@ -2181,7 +2172,6 @@ static char *_load_jobs(uint16_t rpc_version, Buf buffer,
 			   object.name,
 			   object.nodelist,
 			   object.node_inx,
-			   object.packid,
 			   object.partition,
 			   object.priority,
 			   object.qos,
