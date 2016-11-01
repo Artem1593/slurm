@@ -9626,12 +9626,6 @@ _unpack_job_desc_msg(job_desc_msg_t ** job_desc_buffer_ptr, Buf buffer,
 		job_desc_ptr->ramdiskimage = NULL;
 		safe_unpack16(&job_desc_ptr->wait_all_nodes, buffer);
 		safe_unpack32(&job_desc_ptr->bitflags, buffer);
-		safe_unpackstr_array(&job_desc_ptr->pelog_env,
-				     &job_desc_ptr->pelog_env_size,
-				     buffer);
-		safe_unpack8(&job_desc_ptr->resv_port, buffer);
-		safe_unpack32(&job_desc_ptr->group_number, buffer);
-		safe_unpack32(&job_desc_ptr->numpack, buffer);
 	} else if (protocol_version >= SLURM_MIN_PROTOCOL_VERSION) {
 		uint32_t tmp_mem;
 		uint16_t old_nice = 0;
