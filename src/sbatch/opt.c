@@ -2049,6 +2049,7 @@ static void _set_options(int argc, char **argv)
 
 	spank_option_table_destroy (optz);
 }
+}
 
 static void _proc_get_user_env(char *optarg)
 {
@@ -2068,6 +2069,7 @@ static void _proc_get_user_env(char *optarg)
 	else if ((end_ptr[0] == 'l') || (end_ptr[0] == 'L'))
 		opt.get_user_env_mode = 2;
 }
+
 static void _set_bsub_options(int argc, char **argv) {
 
 	int opt_char, option_index = 0;

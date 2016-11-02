@@ -3020,10 +3020,10 @@ static void _pack_ctld_job_step_info(struct step_record *step_ptr, Buf buffer,
 		select_g_select_jobinfo_pack(step_ptr->select_jobinfo, buffer,
 					     protocol_version);
 		packstr(step_ptr->tres_fmt_alloc_str, buffer);
+		pack32(step_ptr->packjobid, buffer);
+		pack32(step_ptr->packstepid, buffer);
 		pack16(step_ptr->start_protocol_ver, buffer);
 	} else if (protocol_version >= SLURM_MIN_PROTOCOL_VERSION) {
-		pack32(step_ptr->packstepid[0], buffer);
-		pack32(step_ptr->packstepid[1], buffer);
 		pack32(step_ptr->job_ptr->array_job_id, buffer);
 		pack32(step_ptr->job_ptr->array_task_id, buffer);
 		pack32(step_ptr->job_ptr->job_id, buffer);
@@ -4116,10 +4116,12 @@ extern int load_step_state(struct job_record *job_ptr, Buf buffer,
 		xfree(core_job);
 	}
 
-	if (step_ptr->step_layout && switch_tmp)
+	if (step_ptr->step_layout && switch_tmp && step_ptr->step_layout->node_list) {
 		switch_g_job_step_allocated(switch_tmp,
 					    step_ptr->step_layout->node_list);
-
+	} else {
+		switch_g_job_step_allocated(switch_tmp, NULL);
+	}
 	info("recovered job step %u.%u", job_ptr->job_id, step_id);
 	return SLURM_SUCCESS;
 
