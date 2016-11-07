@@ -42,6 +42,7 @@
 #include "src/common/read_config.h"
 #include "src/common/xmalloc.h"
 #include "src/common/xstring.h"
+//#include "src/srun/libsrun/opt.h" // MNP PMI
 
 /*
 ** Define slurm-specific aliases for use by plugins, see slurm_xlator.h
@@ -173,7 +174,6 @@ slurm_step_layout_t *fake_slurm_step_layout_create(
 						       step_layout->tasks[i]);
 			step_layout->mpi_tids[i] = xmalloc(sizeof(uint32_t) *
 						       step_layout->tasks[i]); // MNP PMI
-
 			for (j = 0; j < step_layout->tasks[i]; j++) {
 				step_layout->tids[i][j] =
 					step_layout->task_cnt++;
@@ -275,6 +275,9 @@ extern void pack_slurm_step_layout(slurm_step_layout_t *step_layout,
 			pack32_array(step_layout->tids[i],
 				     step_layout->tasks[i],
 				     buffer);
+			pack32_array(step_layout->mpi_tids[i],
+				     step_layout->tasks[i],
+				     buffer); // MNP PMI
 		}
 	} else if (protocol_version >= SLURM_MIN_PROTOCOL_VERSION) {
 		if (step_layout)
@@ -335,10 +338,15 @@ extern int unpack_slurm_step_layout(slurm_step_layout_t **layout, Buf buffer,
 			xmalloc(sizeof(uint32_t) * step_layout->node_cnt);
 		step_layout->tids = xmalloc(sizeof(uint32_t *)
 					    * step_layout->node_cnt);
+		step_layout->mpi_tids = xmalloc(sizeof(uint32_t *)
+					    * step_layout->node_cnt); // MNP PMI
 		for (i = 0; i < step_layout->node_cnt; i++) {
 			safe_unpack32_array(&(step_layout->tids[i]),
 					    &num_tids,
 					    buffer);
+			safe_unpack32_array(&(step_layout->mpi_tids[i]),
+					    &num_tids,
+					    buffer); // MNP PMI
 			step_layout->tasks[i] = num_tids;
 		}
 	} else if (protocol_version >= SLURM_MIN_PROTOCOL_VERSION) {
@@ -745,7 +753,6 @@ static int _task_layout_cyclic(slurm_step_layout_t *step_layout,
 					 * (step_layout->tasks[i] + 1));
 				xrealloc(step_layout->mpi_tids[i], sizeof(uint32_t)
 					 * (step_layout->tasks[i] + 1)); // MNP PMI
-
 				step_layout->tids[i][step_layout->tasks[i]] =
 					taskid;
 				debug("!!!!!!!! MNP in _task_layout_cyclic, step_layout->tids[%d][step_layout->tasks[%d]]=%d",i,i,taskid );
