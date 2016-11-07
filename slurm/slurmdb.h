@@ -720,7 +720,7 @@ typedef struct {
 	uint32_t jobid;
 	char	*jobname;
 	uint32_t lft;
-	uint32_t packid;							/* wjb */
+	uint32_t packid;
 	char	*partition;
 	char	*nodes;
 	uint32_t priority;
