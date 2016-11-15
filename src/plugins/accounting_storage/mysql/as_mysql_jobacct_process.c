@@ -151,6 +151,8 @@ enum {
 /* if this changes you will need to edit the corresponding
  * enum below also t1 is step_table */
 char *step_req_inx[] = {
+	"t1.id_packjob",
+	"t1.id_packstep",
 	"t1.id_step",
 	"t1.time_start",
 	"t1.time_end",
@@ -162,8 +164,6 @@ char *step_req_inx[] = {
 	"t1.kill_requid",
 	"t1.exit_code",
 	"t1.nodes_alloc",
-	"t1.packjobid",
-	"t1.packstepid",
 	"t1.task_cnt",
 	"t1.task_dist",
 	"t1.user_sec",
@@ -203,6 +203,8 @@ char *step_req_inx[] = {
 };
 
 enum {
+	STEP_REQ_PACKJOBID,
+	STEP_REQ_PACKSTEPID,
 	STEP_REQ_STEPID,
 	STEP_REQ_START,
 	STEP_REQ_END,
@@ -214,8 +216,6 @@ enum {
 	STEP_REQ_KILL_REQUID,
 	STEP_REQ_EXIT_CODE,
 	STEP_REQ_NODES,
-	STEP_REQ_PACKJOBID,
-	STEP_REQ_PACKSTEPID,
 	STEP_REQ_TASKS,
 	STEP_REQ_TASKDIST,
 	STEP_REQ_USER_SEC,
