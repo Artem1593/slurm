@@ -192,8 +192,24 @@ typedef struct sbatch_options {
 	char *mcs_label;	/* mcs label if mcs plugin in use */
 	time_t deadline;	/* ---deadline                  */
 	uint32_t delay_boot;	/* --delay-boot			*/
+	uint8_t resv_port;      /* reserve port for node - jobpack */
+	int group_number;       /* pack group number */
 } opt_t;
 
+typedef struct {
+	bool packleader;
+	bool pack_job;
+	uint32_t job_id;
+	opt_t *opt;
+	char *script_name;
+	void *script_body;
+	job_desc_msg_t *desc;
+	submit_response_msg_t *resp;
+	uint32_t ac;
+	char **av;
+} pack_job_env_t;
+
+extern pack_job_env_t *pack_job_env;
 extern opt_t opt;
 extern int error_exit;
 extern int ignore_pbs;

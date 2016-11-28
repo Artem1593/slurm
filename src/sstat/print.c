@@ -352,6 +352,16 @@ void print_fields(slurmdb_step_rec_t *step)
 					     step->ntasks,
 					     (curr_inx == field_count));
 			break;
+		case PRINT_PACKJOBID:
+			field->print_routine(field,
+					     step->packjobid,
+					     (curr_inx == field_count));
+			break;
+		case PRINT_PACKSTEPID:
+			field->print_routine(field,
+					     step->packstepid,
+					     (curr_inx == field_count));
+			break;
 		case PRINT_PIDS:
                         field->print_routine(field,
                                              step->pid_str,

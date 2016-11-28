@@ -45,7 +45,10 @@
 #include "src/common/xstring.h"
 #include "src/common/plugin.h"
 #include "src/common/plugrack.h"
+#include "src/common/srun_globals.h"
 #include "src/common/xsignal.h"
+#include "src/api/step_ctx.h"
+
 
 typedef struct {
 	int (*setup_srun_opt)      (char **rest);
@@ -172,6 +175,7 @@ extern int launch_common_create_job_step(srun_job_t *job, bool use_all_cpus,
 
 	slurm_step_ctx_params_t_init(&job->ctx_params);
 	job->ctx_params.job_id = job->jobid;
+	job->ctx_params.mpi_jobid = job->mpi_jobid;
 	job->ctx_params.uid = opt.uid;
 
 	/* Validate minimum and maximum node counts */
@@ -198,6 +202,16 @@ extern int launch_common_create_job_step(srun_job_t *job, bool use_all_cpus,
 
 	if (!opt.ntasks_set && (opt.ntasks_per_node != NO_VAL))
 		job->ntasks = opt.ntasks = job->nhosts * opt.ntasks_per_node;
+	opt.mpi_stepftaskid = mpi_curtaskid;
+	if (!opt.mpi_combine) {
+		opt.mpi_stepftaskid = 0;
+	}
+	mpi_curtaskid += opt.ntasks;
+	opt.mpi_stepfnodeid = mpi_curnodecnt;
+	if (!opt.mpi_combine) {
+		opt.mpi_stepfnodeid = 0;
+	}
+	mpi_curnodecnt += job->nhosts;
 	job->ctx_params.task_count = opt.ntasks;
 
 	if (opt.mem_per_cpu != NO_VAL64)
@@ -349,6 +363,10 @@ extern int launch_common_create_job_step(srun_job_t *job, bool use_all_cpus,
 				verbose("Resources allocated for job %u and "
 					"being configured, please wait",
 					job->ctx_params.job_id);
+			} else if (job->pack_member &&
+				   rc == ESLURM_NODES_BUSY) {
+				   fatal("JPCK: nodes  busy, assume "
+				         "job_pack with exclusive allocation");
 			} else {
 				info("Job step creation temporarily disabled, "
 				     "retrying");

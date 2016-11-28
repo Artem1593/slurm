@@ -151,8 +151,12 @@ typedef struct {
 	char *resv_id;
 	char **spank_job_env;
 	uint32_t spank_job_env_size;
+	char **pelog_env;
+	uint32_t pelog_env_size;
 	uid_t uid;
 	char *user_name;
+	char **supp_job_env;
+	uint32_t supp_job_env_size;
 } job_env_t;
 
 static int  _abort_step(uint32_t job_id, uint32_t step_id);
@@ -1469,8 +1473,11 @@ _rpc_launch_tasks(slurm_msg_t *msg)
 		job_env.partition = req->partition;
 		job_env.spank_job_env = req->spank_job_env;
 		job_env.spank_job_env_size = req->spank_job_env_size;
+		job_env.pelog_env = req->pelog_env;
+		job_env.pelog_env_size = req->pelog_env_size;
 		job_env.uid = req->uid;
 		job_env.user_name = req->user_name;
+
 		rc =  _run_prolog(&job_env, req->cred);
 		if (rc) {
 			int term_sig, exit_status;
@@ -1938,6 +1945,8 @@ static void _spawn_prolog_stepd(slurm_msg_t *msg)
 	launch_req->partition		= req->partition;
 	launch_req->spank_job_env_size	= req->spank_job_env_size;
 	launch_req->spank_job_env	= req->spank_job_env;
+	launch_req->pelog_env_size	= req->pelog_env_size;
+	launch_req->pelog_env   	= req->pelog_env;
 	launch_req->step_mem_lim	= req->job_mem_limit;
 	launch_req->tasks_to_launch	= xmalloc(sizeof(uint16_t)
 						  * req->nnodes);
@@ -2033,6 +2042,8 @@ static void _rpc_prolog(slurm_msg_t *msg)
 		job_env.partition = req->partition;
 		job_env.spank_job_env = req->spank_job_env;
 		job_env.spank_job_env_size = req->spank_job_env_size;
+		job_env.pelog_env = req->pelog_env;
+		job_env.pelog_env_size = req->pelog_env_size;
 		job_env.uid = req->uid;
 		job_env.user_name = req->user_name;
 #if defined(HAVE_BG)
@@ -2145,8 +2156,17 @@ _rpc_batch_job(slurm_msg_t *msg, bool new_msg)
 		job_env.partition = req->partition;
 		job_env.spank_job_env = req->spank_job_env;
 		job_env.spank_job_env_size = req->spank_job_env_size;
+		job_env.pelog_env = req->pelog_env;
+		job_env.pelog_env_size = req->pelog_env_size;
 		job_env.uid = req->uid;
 		job_env.user_name = req->user_name;
+
+		/* generate the SLURM_*_PACK_GROUP envs for the job in the
+		   sbatch allocation even though this will be called again
+		   later (in mgr.c) because we need this for info now for
+		   the prolog environment */
+		env_array_for_batch_job(&req->environment, req, NULL);
+
 		/*
 	 	 * Run job prolog on this node
 	 	 */
@@ -4984,6 +5004,8 @@ _rpc_abort_job(slurm_msg_t *msg)
 	job_env.node_list = req->nodes;
 	job_env.spank_job_env = req->spank_job_env;
 	job_env.spank_job_env_size = req->spank_job_env_size;
+	job_env.pelog_env = req->pelog_env;
+	job_env.pelog_env_size = req->pelog_env_size;
 	job_env.uid = req->job_uid;
 
 #if defined(HAVE_BG)
@@ -5407,6 +5429,8 @@ _rpc_terminate_job(slurm_msg_t *msg)
 	job_env.node_list = req->nodes;
 	job_env.spank_job_env = req->spank_job_env;
 	job_env.spank_job_env_size = req->spank_job_env_size;
+	job_env.pelog_env = req->pelog_env;
+	job_env.pelog_env_size = req->pelog_env_size;
 	job_env.uid = req->job_uid;
 
 #if defined(HAVE_BG)
@@ -5656,6 +5680,16 @@ _build_env(job_env_t *job_env)
 	if (job_env->spank_job_env_size) {
 		env_array_merge_spank(&env,
 				      (const char **) job_env->spank_job_env);
+	}
+
+	if (job_env->pelog_env_size) {
+		env_array_merge(&env,
+				      (const char **) job_env->pelog_env);
+	}
+
+	if (job_env->supp_job_env_size) {
+		env_array_merge(&env,
+				      (const char **) job_env->supp_job_env);
 	}
 
 	slurm_mutex_lock(&conf->config_mutex);

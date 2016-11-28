@@ -594,11 +594,19 @@ extern int launch_p_step_launch(
 	launch_params.cpu_freq_max      = opt.cpu_freq_max;
 	launch_params.cpu_freq_gov      = opt.cpu_freq_gov;
 	launch_params.task_dist         = opt.distribution;
+	launch_params.mpi_jobid         = opt.mpi_jobid;
+	launch_params.mpi_stepid        = opt.mpi_stepid;
+	launch_params.mpi_ntasks        = opt.mpi_ntasks;
+	launch_params.mpi_nnodes        = opt.mpi_nnodes;
+	launch_params.mpi_stepfnodeid   = opt.mpi_stepfnodeid;
+	launch_params.mpi_stepftaskid   = opt.mpi_stepftaskid;
 	launch_params.ckpt_dir		= opt.ckpt_dir;
 	launch_params.restart_dir       = opt.restart_dir;
 	launch_params.preserve_env      = opt.preserve_env;
 	launch_params.spank_job_env     = opt.spank_job_env;
 	launch_params.spank_job_env_size = opt.spank_job_env_size;
+	launch_params.pelog_env         = opt.pelog_env;
+	launch_params.pelog_env_size    = opt.pelog_env_size;
 	launch_params.user_managed_io   = opt.user_managed_io;
 	launch_params.ntasks_per_board  = job->ntasks_per_board;
 	launch_params.ntasks_per_core   = job->ntasks_per_core;
@@ -668,7 +676,6 @@ extern int launch_p_step_launch(
 		else
 			mpir_set_executable_names(launch_params.argv[0]);
 		MPIR_debug_state = MPIR_DEBUG_SPAWNED;
-
 		if (opt.debugger_test)
 			mpir_dump_proctable();
 		else

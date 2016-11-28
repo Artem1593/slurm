@@ -132,7 +132,9 @@ typedef struct srun_options {
 	unsigned int jobid;     /* --jobid=jobid                */
 	bool jobid_set;		/* true if jobid explicitly set */
 	char *mpi_type;		/* --mpi=type			*/
+	bool  mpi_combine;	/* --mpi-combine=yes|no		*/
 	char *dependency;	/* --dependency, -P type:jobid	*/
+	char *pack_group;	/* --pack-group	                */
 	int nice;		/* --nice			*/
 	uint32_t priority;	/* --priority */
 	char *account;		/* --account, -U acct_name	*/
@@ -231,6 +233,8 @@ typedef struct srun_options {
 	char **spank_job_env;	/* SPANK controlled environment for job
 				 * Prolog and Epilog		*/
 	int spank_job_env_size;	/* size of spank_job_env	*/
+	char **pelog_env; 	/* other prolog/epilog environment envs */
+	int pelog_env_size;    	/* size of pelog_env */
 	int req_switch;		/* Minimum number of switches	*/
 	int wait4switch;	/* Maximum time to wait for minimum switches */
 	bool user_managed_io;   /* 0 for "normal" IO, 1 for "user manged" IO */
@@ -245,9 +249,50 @@ typedef struct srun_options {
 	time_t deadline; 	/* --deadline                   */
 	uint32_t job_flags;	/* --gres-flags */
 	uint32_t delay_boot;	/* --delay-boot			*/	
+	uint32_t ngrpidx;     	/* Number of task group indexes */
+	uint32_t *groupidx;	/* Indexes of task groups running these tasks */
+	int group_number;       /* pack group number */  //dhp
+	int shepherd_fd;
+	uint32_t mpi_jobid;	/* MPI jobid (same for all steps) */
+	uint32_t mpi_stepid;	/* MPI stepid (same for all steps) */
+	int mpi_ntasks;		/* number of MPI tasks for all steps combined */
+	int mpi_nnodes;		/* number of MPI nodes for all steps combined */
+	int mpi_stepfnodeid;	/* first MPI nodeid for this step */
+	int mpi_stepftaskid;	/* first MPI taskid for this step */
 } opt_t;
 
 extern opt_t opt;
+extern int mpi_curtaskid;
+extern int mpi_curnodecnt;
+
+typedef struct {
+	bool packleader;
+	bool pack_job;
+	uint32_t group_number;
+	uint32_t job_id;
+	opt_t *opt;
+	env_t *env;
+	srun_job_t *job;
+	resource_allocation_response_msg_t *resp;
+	uint32_t ac;
+	char **av;
+} pack_job_env_t;
+
+extern pack_job_env_t *pack_job_env;
+
+typedef struct {
+	bool groupjob;			/* indicates group numbers designated */
+	uint16_t pack_group_count;	/* count of pack groups for this desc */
+	pack_job_env_t *pack_job_env;	/* array of pack_job_env_t */
+} pack_group_struct_t;
+
+extern pack_group_struct_t *desc;
+
+void copy_opt_struct(opt_t *to, opt_t *from);
+void copy_env_struct(env_t *to, env_t *from);
+void copy_srun_job_struct(srun_job_t *to, srun_job_t *from);
+void copy_resp_struct(resource_allocation_response_msg_t *to,
+		      resource_allocation_response_msg_t *from);
 
 extern int error_exit;		/* exit code for slurm errors */
 extern int immediate_exit;	/* exit code for --imediate option & busy */
@@ -277,6 +322,8 @@ extern resource_allocation_response_msg_t *global_resp;
  * 4. perform some verification that options are reasonable
  */
 int initialize_and_process_args(int argc, char *argv[]);
+int initialize_and_process_args_jobpack(int argc, char *argv[],
+					uint32_t group_number);
 
 /* external functions available for SPANK plugins to modify the environment
  * exported to the SLURM Prolog and Epilog programs */
@@ -284,6 +331,8 @@ extern char *spank_get_job_env(const char *name);
 extern int   spank_set_job_env(const char *name, const char *value,
 			       int overwrite);
 extern int   spank_unset_job_env(const char *name);
+
+extern int   pelog_set_env(int overwrite);
 
 /* Initialize the spank_job_env based upon environment variables set
  *	via salloc or sbatch commands */

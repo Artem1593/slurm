@@ -1890,7 +1890,6 @@ extern void step_alloc_lps(struct step_record *step_ptr)
 	int i_node, i_first, i_last;
 	int job_node_inx = -1, step_node_inx = -1;
 	bool pick_step_cores = true;
-
 	xassert(job_resrcs_ptr);
 	xassert(job_resrcs_ptr->cpus);
 	xassert(job_resrcs_ptr->cpus_used);
@@ -2442,6 +2441,17 @@ step_create(job_step_create_request_msg_t *step_specs,
 	step_ptr->start_time = time(NULL);
 	step_ptr->state      = JOB_RUNNING;
 	step_ptr->step_id    = job_ptr->next_step_id++;
+
+	if (step_specs->packjobid == 0) {
+		step_ptr->packjobid = step_specs->job_id;
+		step_ptr->packstepid = step_ptr->step_id;
+	} else {
+		step_ptr->packjobid = step_specs->packjobid;
+		step_ptr->packstepid = step_specs->packstepid;
+	}
+	debug2("JPCK: step_create set PackStepID %u.%u for JobID %u",
+	       step_ptr->packjobid, step_ptr->packstepid,
+	       job_ptr->job_id);
 
 	/* Here is where the node list is set for the step */
 	if (step_specs->node_list &&

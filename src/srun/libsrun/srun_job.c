@@ -101,7 +101,12 @@ typedef struct allocation_info {
 	uint32_t                stepid;
 } allocation_info_t;
 
-static int shepherd_fd = -1;
+extern uint32_t pack_desc_count;
+extern uint32_t group_index;
+extern uint32_t job_index;
+extern bool packjob;
+extern bool packleader;
+
 static pthread_t signal_thread = (pthread_t) 0;
 static int pty_sigarray[] = { SIGWINCH, 0 };
 
@@ -121,6 +126,7 @@ static void _handle_pipe(void);
 static void _print_job_information(resource_allocation_response_msg_t *resp);
 static void _run_srun_epilog (srun_job_t *job);
 static void _run_srun_prolog (srun_job_t *job);
+static void _run_srun_prolog_jobpack (void);
 static int _run_srun_script (srun_job_t *job, char *script);
 static void _set_env_vars(resource_allocation_response_msg_t *resp);
 static void  _set_prio_process_env(void);
@@ -133,6 +139,16 @@ static void *_srun_signal_mgr(void *no_data);
 static void _step_opt_exclusive(void);
 static int _validate_relative(resource_allocation_response_msg_t *resp);
 
+
+static opt_t *_get_opt(int desc_idx, int job_idx)
+{
+	return desc[desc_idx].pack_job_env[job_idx].opt;
+}
+
+static srun_job_t *_get_srun_job(int desc_idx, int job_idx)
+{
+	return desc[desc_idx].pack_job_env[job_idx].job;
+}
 
 /*
  * Create an srun job structure w/out an allocation response msg.
@@ -487,6 +503,59 @@ extern void init_srun(int ac, char **av,
 
 	/* Set up slurmctld message handler */
 	slurmctld_msg_init();
+}
+
+extern void init_srun_jobpack(int ac, char **av,
+		      log_options_t *logopt, int debug_level,
+		      bool handle_signals)
+{
+	uint32_t group_number;
+
+	/* This must happen before we spawn any threads
+	 * which are not designed to handle arbitrary signals */
+	if (handle_signals) {
+		if (xsignal_block(sig_array) < 0)
+			error("Unable to block signals");
+	}
+	xsignal_block(pty_sigarray);
+
+	/* set default options, process commandline arguments, and
+	 * verify some basic values
+	 */
+
+	/* set special prolog/epilog env vars */
+	pelog_set_env(1);
+
+	group_number = desc[group_index].pack_job_env[job_index].group_number;
+	if (initialize_and_process_args_jobpack(ac, av, group_number) < 0) {
+		error ("srun initialization failed");
+		exit (1);
+	}
+	desc[group_index].pack_job_env[job_index].job_id = opt.jobid;
+
+	record_ppid();
+
+	/* reinit log with new verbosity (if changed by command line)
+	 */
+	if (logopt && (_verbose || opt.quiet)) {
+		/* If log level is already increased, only increment the
+		 *   level to the difference of _verbose an LOG_LEVEL_INFO
+		 */
+		if ((_verbose -= (logopt->stderr_level - LOG_LEVEL_INFO)) > 0)
+			logopt->stderr_level += _verbose;
+		logopt->stderr_level -= opt.quiet;
+		logopt->prefix_level = 1;
+		log_alter(*logopt, 0, NULL);
+	} else
+		_verbose = debug_level;
+
+	(void) _set_rlimit_env();
+	_set_prio_process_env();
+	(void) _set_umask_env();
+	_set_submit_dir_env();
+
+	/* Set up slurmctld message handler */
+	slurmctld_msg_init();
 
 	/* save process startup time to be used with -I<timeout> */
 	srun_begin_time = time(NULL);
@@ -516,6 +585,8 @@ extern void create_srun_job(srun_job_t **p_job, bool *got_alloc,
 			error("Job creation failure.");
 			exit(error_exit);
 		}
+		opt.mpi_jobid = opt.jobid;
+		opt.mpi_stepid = 0;
 		if (create_job_step(job, false) < 0) {
 			exit(error_exit);
 		}
@@ -573,6 +644,8 @@ extern void create_srun_job(srun_job_t **p_job, bool *got_alloc,
 			error("--begin is ignored because nodes"
 			      " are already allocated.");
 		}
+		opt.mpi_jobid = opt.jobid;
+		opt.mpi_stepid = 0;
 		if (!job || create_job_step(job, false) < 0)
 			exit(error_exit);
 	} else {
@@ -628,6 +701,8 @@ extern void create_srun_job(srun_job_t **p_job, bool *got_alloc,
 		if (_become_user () < 0)
 			info("Warning: Unable to assume uid=%u", opt.uid);
 
+		opt.mpi_jobid = opt.jobid;
+		opt.mpi_stepid = 0;
 		if (!job || create_job_step(job, true) < 0) {
 			slurm_complete_job(resp->job_id, 1);
 			exit(error_exit);
@@ -636,6 +711,7 @@ extern void create_srun_job(srun_job_t **p_job, bool *got_alloc,
 		global_resp = NULL;
 		slurm_free_resource_allocation_response_msg(resp);
 	}
+	job->pack_member = false;
 
 	/*
 	 *  Become --uid user
@@ -648,10 +724,218 @@ extern void create_srun_job(srun_job_t **p_job, bool *got_alloc,
 		 * Spawn process to insure clean-up of job and/or step
 		 * on abnormal termination
 		 */
-		shepherd_fd = _shepherd_spawn(job, *got_alloc);
+		opt.shepherd_fd = -1;
+		opt.shepherd_fd = _shepherd_spawn(job, *got_alloc);
 	}
 
 	*p_job = job;
+}
+
+extern void create_srun_jobpack(srun_job_t **p_job, bool *got_alloc,
+			    bool slurm_started, bool handle_signals)
+{
+	resource_allocation_response_msg_t *resp;
+	srun_job_t *job = NULL;
+	int desc_index = 0;
+	char *tmp = NULL;
+	int numpack;
+
+	/* now global "opt" should be filled in and available,
+	 * create a job from opt
+	 */
+	if (opt.test_only) {
+		int rc = allocate_test();
+		if (rc) {
+			slurm_perror("allocation failure");
+			exit (1);
+		}
+		exit (0);
+
+	} else if (opt.no_alloc) {
+		info("do not allocate resources");
+		job = job_create_noalloc();
+		if (job == NULL) {
+			error("Job creation failure.");
+			exit(error_exit);
+		}
+		opt.mpi_jobid = opt.jobid;
+		opt.mpi_stepid = 0;
+		if (create_job_step(job, false) < 0) {
+			exit(error_exit);
+		}
+	} else if ((resp = existing_allocation())) {
+		opt.mpi_jobid = opt.jobid;
+		select_g_alter_node_cnt(SELECT_APPLY_NODE_MAX_OFFSET,
+					&resp->node_cnt);
+		if (opt.nodes_set_env && !opt.nodes_set_opt &&
+		    (opt.min_nodes > resp->node_cnt)) {
+			/* This signifies the job used the --no-kill option
+			 * and a node went DOWN or it used a node count range
+			 * specification, was checkpointed from one size and
+			 * restarted at a different size */
+			error("SLURM_NNODES environment variable "
+			      "conflicts with allocated node count (%u!=%u).",
+			      opt.min_nodes, resp->node_cnt);
+			/* Modify options to match resource allocation.
+			 * NOTE: Some options are not supported */
+			opt.min_nodes = resp->node_cnt;
+			xfree(opt.alloc_nodelist);
+			if (!opt.ntasks_set)
+				opt.ntasks = opt.min_nodes;
+		}
+		if (opt.core_spec_set) {
+			/* NOTE: Silently ignore specialized core count set
+			 * with SLURM_CORE_SPEC environment variable */
+			error("Ignoring --core-spec value for a job step "
+			      "within an existing job. Set specialized cores "
+			      "at job allocation time.");
+		}
+#ifdef HAVE_NATIVE_CRAY
+		if (opt.network) {
+			if (opt.network_set_env)
+				debug2("Ignoring SLURM_NETWORK value for a "
+				       "job step within an existing job. "
+				       "Using what was set at job "
+				       "allocation time.  Most likely this "
+				       "variable was set by sbatch or salloc.");
+			else
+				error("Ignoring --network value for a job step "
+				      "within an existing job. Set network "
+				      "options at job allocation time.");
+		}
+#endif
+		if (opt.alloc_nodelist == NULL)
+			opt.alloc_nodelist = xstrdup(resp->node_list);
+		if (opt.exclusive)
+			_step_opt_exclusive();
+		_set_env_vars(resp);
+		if (_validate_relative(resp))
+			exit(error_exit);
+		job = job_step_create_allocation(resp);
+		if (!job)
+			exit(error_exit);
+		job->pack_member = true;
+		copy_srun_job_struct(desc[group_index].pack_job_env[
+				     job_index].job, job);
+		slurm_free_resource_allocation_response_msg(resp);
+		if (opt.begin != 0) {
+			error("--begin is ignored because nodes"
+			      " are already allocated.");
+		}
+		if (!slurm_started) {
+			/*
+			* Spawn process to insure clean-up of
+			* job and/or step on abnormal term
+			*/
+		opt.shepherd_fd = -1;
+		opt.shepherd_fd = _shepherd_spawn(job,
+				 *got_alloc);
+			 
+			copy_opt_struct(desc[group_index].pack_job_env[
+					job_index].opt, &opt);
+		}
+	} else {
+		/* Combined job allocation and job step launch */
+		opt.mpi_jobid = opt.jobid;
+		if (desc[group_index].groupjob == true)
+			fatal("pack-group option used for a job that is not a "
+			      "job_pack");
+		if ((tmp = getenv ("SLURM_NUMPACK"))) {
+			numpack = atoi(tmp);
+			if (numpack > 1 ) {
+				fatal("Pack job didn't use the existing "
+				      "allocation");
+			}
+
+		}
+#if defined HAVE_FRONT_END && (!defined HAVE_BG || defined HAVE_BG_L_P || !defined HAVE_BG_FILES) && (!defined HAVE_REAL_CRAY)
+		uid_t my_uid = getuid();
+		if ((my_uid != 0) &&
+		    (my_uid != slurm_get_slurm_user_id())) {
+			error("srun task launch not supported on this system");
+			exit(error_exit);
+		}
+#endif
+		if (opt.relative_set && opt.relative) {
+			fatal("--relative option invalid for job allocation "
+			      "request");
+		}
+
+		if (!opt.job_name_set_env && opt.job_name_set_cmd)
+			setenvfs("SLURM_JOB_NAME=%s", opt.job_name);
+		else if (!opt.job_name_set_env && opt.argc)
+			setenvfs("SLURM_JOB_NAME=%s", opt.argv[0]);
+
+		if ( !(resp = allocate_nodes(handle_signals)) )
+			exit(error_exit);
+
+		if (packjob == true) {
+			return;
+		}
+		global_resp = resp;
+		*got_alloc = true;
+		for (desc_index = 0; desc_index < pack_desc_count;
+		     desc_index++) {
+			copy_opt_struct(&opt,
+					desc[desc_index].pack_job_env[0].opt);
+			copy_resp_struct(resp,desc[desc_index].pack_job_env[
+					 0].resp);
+			_print_job_information(resp);
+			_set_env_vars(resp);
+			if (_validate_relative(resp)) {
+				slurm_complete_job(resp->job_id, 1);
+				exit(error_exit);
+			}
+			/* save job for pack-member */
+			job = job_create_allocation(resp);
+			if (!job)
+				exit(error_exit);
+			job->pack_member = true;
+			copy_srun_job_struct(desc[desc_index].pack_job_env[
+					     0].job, job);
+
+			opt.time_limit = NO_VAL;/* not applicable for step,
+						 * only job */
+			xfree(opt.constraints);	/* not applicable for this
+						 * step */
+			if (!opt.job_name_set_cmd && opt.job_name_set_env) {
+				/* use SLURM_JOB_NAME env var */
+				opt.job_name_set_cmd = true;
+			}
+			if ((opt.core_spec_set || opt.exclusive) &&
+			    opt.cpus_set) {
+				/* Step gets specified CPU count, which may only
+				* part of the job allocation. */
+				opt.exclusive = true;
+			} else {
+				/* Step gets all CPUs in the job allocation. */
+				opt.exclusive = false;
+			}
+			if (!slurm_started) {
+				/*
+				* Spawn process to insure clean-up of
+				* job and/or step on abnormal term
+				*/
+				opt.shepherd_fd = -1;
+				opt.shepherd_fd = _shepherd_spawn(job,
+						 *got_alloc);
+			}
+			/*
+			*  Become --uid user
+			*/
+			if (_become_user () < 0)
+				info("Warning: Unable to assume uid=%u",
+				     opt.uid);
+			if (packleader == true) {
+				*p_job = desc[0].pack_job_env[0].job;
+			}
+			/* save updated opt information for pack-member */
+			copy_opt_struct(desc[desc_index].pack_job_env[0].opt,
+					&opt);
+		}
+
+	}
+	copy_opt_struct(&opt, desc[0].pack_job_env[0].opt);
 }
 
 extern void pre_launch_srun_job(srun_job_t *job, bool slurm_started,
@@ -673,7 +957,10 @@ extern void pre_launch_srun_job(srun_job_t *job, bool slurm_started,
 	if (slurm_started)
 		return;
 
-	_run_srun_prolog(job);
+	if (job->pack_member)
+		_run_srun_prolog_jobpack();
+	else
+		_run_srun_prolog(job);
 	if (_call_spank_local_user (job) < 0) {
 		error("Failure in local plugin stack");
 		slurm_step_launch_abort(job->step_ctx);
@@ -695,8 +982,9 @@ extern void fini_srun(srun_job_t *job, bool got_alloc, uint32_t *global_rc,
 			slurm_complete_job(job->jobid, NO_VAL);
 		else
 			slurm_complete_job(job->jobid, *global_rc);
-	}
-	_shepherd_notify(shepherd_fd);
+		}
+
+	_shepherd_notify(opt.shepherd_fd);
 
 cleanup:
 	if (signal_thread) {
@@ -889,6 +1177,7 @@ _job_create_structure(allocation_info_t *ainfo)
 #endif
 	job->select_jobinfo = ainfo->select_jobinfo;
 	job->jobid   = ainfo->jobid;
+	job->mpi_jobid = ainfo->jobid;
 
 	job->ntasks  = opt.ntasks;
 	job->ntasks_per_board = ainfo->ntasks_per_board;
@@ -1102,6 +1391,27 @@ static void _run_srun_prolog (srun_job_t *job)
 	if (opt.prolog && xstrcasecmp(opt.prolog, "none") != 0) {
 		rc = _run_srun_script(job, opt.prolog);
 		debug("srun prolog rc = %d", rc);
+	}
+}
+
+static void _run_srun_prolog_jobpack (void)
+{
+	int job_index, i, j, rc;
+	srun_job_t *job;
+	opt_t *opt_ptr;
+
+	for (i=0; i < pack_desc_count; i++) {
+		job_index = desc[i].pack_group_count;
+		if (job_index == 0) job_index++;
+		for (j=0; j < job_index; j++) {
+			opt_ptr = _get_opt(i,j);
+			job = _get_srun_job(i,j);
+			if (opt_ptr->prolog && strcasecmp(opt_ptr->prolog,
+			    "none") != 0) {
+				rc = _run_srun_script(job, opt_ptr->prolog);
+				debug("srun prolog rc = %d", rc);
+			}
+		}
 	}
 }
 
@@ -1490,6 +1800,6 @@ static int _validate_relative(resource_allocation_response_msg_t *resp)
 
 static void _call_spank_fini(void)
 {
-	if (-1 != shepherd_fd)
+	if (-1 != opt.shepherd_fd)
 		spank_fini(NULL);
 }

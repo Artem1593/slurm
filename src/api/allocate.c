@@ -143,11 +143,12 @@ slurm_allocate_resources (job_desc_msg_t *req,
 	return SLURM_PROTOCOL_SUCCESS;
 }
 
-
 /*
- * slurm_allocate_resources_blocking
- *	allocate resources for a job request.  This call will block until
- *	the allocation is granted, or the specified timeout limit is reached.
+ * _slurm_allocate_resources_cb
+ * 	Helper function to trigger blocking or non-blocking callbacks.
+ *	allocate resources for a job request.  If blocking is true, this call
+ *	will block until the allocation is granted, or the specified timeout
+ *	limit is reached.
  * IN req - description of resource allocation request
  * IN timeout - amount of time, in seconds, to wait for a response before
  * 	giving up.
@@ -156,16 +157,19 @@ slurm_allocate_resources (job_desc_msg_t *req,
  *      the controller will put the job in the PENDING state.  If
  *      pending callback is not NULL, it will be called with the job_id
  *      of the pending job as the sole parameter.
+ * IN blocking - Whether this call should block and wait for an allocation to be
+ *      granted.
  *
  * RET allocation structure on success, NULL on error set errno to
  *	indicate the error (errno will be ETIMEDOUT if the timeout is reached
  *      with no allocation granted)
  * NOTE: free the response using slurm_free_resource_allocation_response_msg()
  */
-resource_allocation_response_msg_t *
-slurm_allocate_resources_blocking (const job_desc_msg_t *user_req,
+static resource_allocation_response_msg_t *
+_slurm_allocate_resources_cb(const job_desc_msg_t *user_req,
 				   time_t timeout,
-				   void(*pending_callback)(uint32_t job_id))
+				   void(*pending_callback)(uint32_t job_id),
+				   bool blocking)
 {
 	int rc;
 	slurm_msg_t req_msg;
@@ -255,7 +259,9 @@ slurm_allocate_resources_blocking (const job_desc_msg_t *user_req,
 			slurm_free_resource_allocation_response_msg(resp);
 			if (pending_callback != NULL)
 				pending_callback(job_id);
- 			resp = _wait_for_allocation_response(job_id, listen,
+			if (!blocking)
+				break;
+			resp = _wait_for_allocation_response(job_id, listen,
 							     timeout);
 			/* If NULL, we didn't get the allocation in
 			   the time desired, so just free the job id */
@@ -279,6 +285,55 @@ slurm_allocate_resources_blocking (const job_desc_msg_t *user_req,
 	errno = errnum;
 	return resp;
 }
+
+/*
+ * slurm_allocate_resources_callback
+ *	allocate resources for a job request. non-blocking with callback.
+ * IN req - description of resource allocation request
+ * IN pending_callback - If the allocation cannot be granted immediately,
+ *      the controller will put the job in the PENDING state.  If
+ *      pending callback is not NULL, it will be called with the job_id
+ *      of the pending job as the sole parameter.
+ *
+ * RET allocation structure on success, NULL on error set errno to
+ *	indicate the error.
+ * NOTE: free the response using slurm_free_resource_allocation_response_msg()
+ */
+resource_allocation_response_msg_t *
+slurm_allocate_resources_callback(const job_desc_msg_t *user_req,
+				  void(*pending_callback)(uint32_t job_id))
+{
+	return _slurm_allocate_resources_cb(user_req, 1, pending_callback,
+					    false);
+}
+
+/*
+ * slurm_allocate_resources_blocking
+ *	allocate resources for a job request.  This call will block until
+ *	the allocation is granted, or the specified timeout limit is reached.
+ * IN req - description of resource allocation request
+ * IN timeout - amount of time, in seconds, to wait for a response before
+ * 	giving up.
+ *	A timeout of zero will wait indefinitely.
+ * IN pending_callback - If the allocation cannot be granted immediately,
+ *      the controller will put the job in the PENDING state.  If
+ *      pending callback is not NULL, it will be called with the job_id
+ *      of the pending job as the sole parameter.
+ *
+ * RET allocation structure on success, NULL on error set errno to
+ *	indicate the error (errno will be ETIMEDOUT if the timeout is reached
+ *      with no allocation granted)
+ * NOTE: free the response using slurm_free_resource_allocation_response_msg()
+ */
+resource_allocation_response_msg_t *
+slurm_allocate_resources_blocking (const job_desc_msg_t *user_req,
+				   time_t timeout,
+				   void(*pending_callback)(uint32_t job_id))
+{
+	return _slurm_allocate_resources_cb(user_req, timeout, pending_callback,
+					    true);
+}
+
 
 /*
  * slurm_job_will_run - determine if a job would execute immediately if

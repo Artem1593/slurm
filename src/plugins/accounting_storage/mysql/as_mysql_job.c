@@ -249,6 +249,7 @@ extern int as_mysql_job_start(mysql_conn_t *mysql_conn,
 	int reinit = 0;
 	time_t begin_time, check_time, start_time, submit_time;
 	uint32_t wckeyid = 0;
+	uint32_t packid = 0;
 	uint32_t job_state;
 	int node_cnt = 0;
 	uint32_t array_task_id =
@@ -457,6 +458,9 @@ no_rollup_change:
 	if (job_ptr->gres_alloc)
 		gres_alloc = slurm_add_slash_to_quotes(job_ptr->gres_alloc);
 
+	if (job_ptr->pack_leader)
+		packid = job_ptr->pack_leader;
+
 	if (!job_ptr->db_index) {
 		query = xstrdup_printf(
 			"insert into \"%s_%s\" "
@@ -472,6 +476,8 @@ no_rollup_change:
 			xstrcat(query, ", id_wckey");
 		if (job_ptr->account)
 			xstrcat(query, ", account");
+		if (packid)
+			xstrcat(query, ", packid");
 		if (partition)
 			xstrcat(query, ", `partition`");
 		if (block_id)
@@ -515,6 +521,8 @@ no_rollup_change:
 			xstrfmtcat(query, ", %u", wckeyid);
 		if (job_ptr->account)
 			xstrfmtcat(query, ", '%s'", job_ptr->account);
+		if (packid)
+			xstrfmtcat(query, ", %u", packid);
 		if (partition)
 			xstrfmtcat(query, ", '%s'", partition);
 		if (block_id)
@@ -565,6 +573,8 @@ no_rollup_change:
 			xstrfmtcat(query, ", id_wckey=%u", wckeyid);
 		if (job_ptr->account)
 			xstrfmtcat(query, ", account='%s'", job_ptr->account);
+		if (packid)
+			xstrfmtcat(query, ", packid=%u", packid);
 		if (partition)
 			xstrfmtcat(query, ", `partition`='%s'", partition);
 		if (block_id)
@@ -618,6 +628,8 @@ no_rollup_change:
 			xstrfmtcat(query, "id_wckey=%u, ", wckeyid);
 		if (job_ptr->account)
 			xstrfmtcat(query, "account='%s', ", job_ptr->account);
+		if (packid)
+			xstrfmtcat(query, "packid=%u, ", packid);
 		if (partition)
 			xstrfmtcat(query, "`partition`='%s', ", partition);
 		if (block_id)
@@ -940,6 +952,8 @@ extern int as_mysql_step_start(mysql_conn_t *mysql_conn,
 	char *node_inx = NULL, *step_name = NULL;
 	time_t start_time, submit_time;
 	char *query = NULL;
+	uint32_t packjobid = 0;
+	uint32_t packstepid = 0;
 
 	if (!step_ptr->job_ptr->db_index
 	    && ((!step_ptr->job_ptr->details
@@ -1062,6 +1076,9 @@ extern int as_mysql_step_start(mysql_conn_t *mysql_conn,
 
 	step_name = slurm_add_slash_to_quotes(step_ptr->name);
 
+		packjobid = step_ptr->packjobid;
+		packstepid = step_ptr->packstepid;
+
 	/* we want to print a -1 for the requid so leave it a
 	   %d */
 	/* The stepid could be -2 so use %d not %u */
@@ -1069,14 +1086,15 @@ extern int as_mysql_step_start(mysql_conn_t *mysql_conn,
 		"insert into \"%s_%s\" (job_db_inx, id_step, time_start, "
 		"step_name, state, tres_alloc, "
 		"nodes_alloc, task_cnt, nodelist, node_inx, "
-		"task_dist, req_cpufreq, req_cpufreq_min, req_cpufreq_gov) "
+		"task_dist, req_cpufreq, req_cpufreq_min, req_cpufreq_gov, "
+		"id_packjob, id_packstep) "
 		"values (%"PRIu64", %d, %d, '%s', %d, '%s', %d, %d, "
-		"'%s', '%s', %d, %u, %u, %u) "
+		"'%s', '%s', %d, %u, %u, %u, %u, %u) "
 		"on duplicate key update "
 		"nodes_alloc=%d, task_cnt=%d, time_end=0, state=%d, "
 		"nodelist='%s', node_inx='%s', task_dist=%d, "
 		"req_cpufreq=%u, req_cpufreq_min=%u, req_cpufreq_gov=%u,"
-		"tres_alloc='%s';",
+		"tres_alloc='%s', id_packjob=%u, id_packstep=%u;",
 		mysql_conn->cluster_name, step_table,
 		step_ptr->job_ptr->db_index,
 		step_ptr->step_id,
@@ -1084,11 +1102,13 @@ extern int as_mysql_step_start(mysql_conn_t *mysql_conn,
 		JOB_RUNNING, step_ptr->tres_alloc_str,
 		nodes, tasks, node_list, node_inx, task_dist,
 		step_ptr->cpu_freq_max, step_ptr->cpu_freq_min,
-		step_ptr->cpu_freq_gov, nodes, tasks, JOB_RUNNING,
-		node_list, node_inx, task_dist, step_ptr->cpu_freq_max,
+		step_ptr->cpu_freq_gov, packjobid, packstepid,
+		nodes, tasks, JOB_RUNNING, node_list, node_inx,
+		task_dist, step_ptr->cpu_freq_max,
 		step_ptr->cpu_freq_min, step_ptr->cpu_freq_gov,
-		step_ptr->tres_alloc_str);
+		step_ptr->tres_alloc_str, packjobid, packstepid);
 	if (debug_flags & DEBUG_FLAG_DB_STEP)
+
 		DB_DEBUG(mysql_conn->conn, "query\n%s", query);
 	rc = mysql_db_query(mysql_conn, query);
 	xfree(query);

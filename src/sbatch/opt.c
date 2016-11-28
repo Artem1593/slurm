@@ -189,6 +189,13 @@ enum wrappers {
 #define LONG_OPT_DEADLINE        0x166
 #define LONG_OPT_BURST_BUFFER_FILE 0x167
 #define LONG_OPT_DELAY_BOOT      0x168
+#define LONG_OPT_RESV_PORT       0x169
+
+extern bool packjob;
+extern bool packleader;
+extern uint32_t group_number;
+extern uint32_t pack_desc_count;
+extern char *pack_job_id;
 
 /*---- global variables, defined in opt.h ----*/
 opt_t opt;
@@ -259,6 +266,16 @@ static void argerror(const char *msg, ...)
 #else
 #  define argerror error
 #endif				/* USE_ARGERROR */
+
+static bool _check_jobpack__opt(char *option)
+{
+	if (packjob == true) {
+		info("WARNING - option %s ignored, allowed for packleader "
+		     "only", option);
+		return false;
+	}
+	return true;
+}
 
 /*
  * If the node list supplied is a file name, translate that into
@@ -420,7 +437,10 @@ static void _opt_default(void)
 	opt.job_flags = 0;
 
 	opt.mcs_label		= NULL;
+	
 	opt.delay_boot      = NO_VAL;
+	
+	opt.resv_port   = 0;
 }
 
 /* Read specified file's contents into a buffer.
@@ -873,6 +893,7 @@ static struct option long_options[] = {
 	{"wait-all-nodes",required_argument, 0, LONG_OPT_WAIT_ALL_NODES},
 	{"wckey",         required_argument, 0, LONG_OPT_WCKEY},
 	{"wrap",          required_argument, 0, LONG_OPT_WRAP},
+	{"resv-port",     no_argument,       0, LONG_OPT_RESV_PORT},
 	{NULL,            0,                 0, 0}
 };
 
@@ -1022,6 +1043,7 @@ int process_options_second_pass(int argc, char *argv[], const char *file,
 		_opt_list();
 
 	return 1;
+
 
 }
 
@@ -1373,7 +1395,18 @@ static void _set_options(int argc, char **argv)
 			break;
 		case 'd':
 			xfree(opt.dependency);
-			opt.dependency = xstrdup(optarg);
+			if ((packjob == true) &&
+			    (strcmp(optarg, "pack") == 0)) {
+				opt.dependency = xstrdup(optarg);
+				break;
+			}
+			if (_check_jobpack__opt("-d")) {
+				opt.dependency = xstrdup(optarg);
+			}
+			else {
+				if (packjob == true)
+					opt.dependency = xstrdup("pack");
+			}
 			break;
 		case 'D':
 			xfree(opt.cwd);
@@ -1409,7 +1442,8 @@ static void _set_options(int argc, char **argv)
 			/* handled in process_options_first_pass() */
 			break;
 		case 'H':
-			opt.hold = true;
+			if (_check_jobpack__opt("-H"))
+				opt.hold = true;
 			break;
 		case 'i':
 			xfree(opt.ifname);
@@ -1419,7 +1453,8 @@ static void _set_options(int argc, char **argv)
 				opt.ifname = xstrdup(optarg);
 			break;
 		case 'I':
-			opt.immediate = true;
+			if (_check_jobpack__opt("-I"))
+				opt.immediate = true;
 			break;
 		case 'J':
 			xfree(opt.job_name);
@@ -1478,7 +1513,18 @@ static void _set_options(int argc, char **argv)
 		case 'P':
 			verbose("-P option is deprecated, use -d instead");
 			xfree(opt.dependency);
-			opt.dependency = xstrdup(optarg);
+			if ((packjob == true) &&
+			    (strcmp(optarg, "pack") == 0)) {
+				opt.dependency = xstrdup(optarg);
+				break;
+			}
+			if (_check_jobpack__opt("-P")) {
+				opt.dependency = xstrdup(optarg);
+			}
+			else {
+				if (packjob == true)
+					opt.dependency = xstrdup("pack");
+			}
 			break;
 		case 'Q':
 			/* handled in process_options_first_pass() */
@@ -1494,7 +1540,8 @@ static void _set_options(int argc, char **argv)
 			break;
 		case 't':
 			xfree(opt.time_limit_str);
-			opt.time_limit_str = xstrdup(optarg);
+			if (_check_jobpack__opt("-t"))
+				opt.time_limit_str = xstrdup(optarg);
 			break;
 		case 'u':
 		case 'v':
@@ -1616,6 +1663,11 @@ static void _set_options(int argc, char **argv)
 			}
 			break;
 		case LONG_OPT_JOBID:
+			if ((packleader == true) || (packjob == true)) {
+				info ("WARNING - option --jobid ignored, "
+				      "not allowed for packleader or packjob");
+				break;
+			}
 			opt.jobid = parse_int("jobid", optarg, true);
 			opt.jobid_set = true;
 			break;
@@ -1644,10 +1696,20 @@ static void _set_options(int argc, char **argv)
 			break;
 		case LONG_OPT_BEGIN:
 			opt.begin = parse_time(optarg, 0);
+			if (_check_jobpack__opt("--begin")) {
+				
+				if (errno == ESLURM_INVALID_TIME_VALUE) {
+					error("Invalid time specification %s",
+					optarg);
+					exit(error_exit);
+				}
+			}
 			if (opt.begin == 0) {
-				error("Invalid time specification %s", optarg);
+				error("Invalid time specification %s",
+				      optarg);
 				exit(error_exit);
 			}
+			
 			break;
 		case LONG_OPT_MAIL_TYPE:
 			opt.mail_type |= parse_mail_type(optarg);
@@ -1878,7 +1940,9 @@ static void _set_options(int argc, char **argv)
 			break;
 		case LONG_OPT_TIME_MIN:
 			xfree(opt.time_min_str);
-			opt.time_min_str = xstrdup(optarg);
+			if (_check_jobpack__opt("--time-min"))
+				opt.time_min_str = xstrdup(optarg);
+
 			break;
 		case LONG_OPT_GRES:
 			if (!xstrcasecmp(optarg, "help") ||
@@ -1962,6 +2026,12 @@ static void _set_options(int argc, char **argv)
 			break;
 		case LONG_OPT_SPREAD_JOB:
 			opt.job_flags |= SPREAD_JOB;
+		case LONG_OPT_RESV_PORT:
+			if (pack_desc_count < 2)
+				info("WARNING - option --resv-port ignored, "
+				     "allowed for Job-Packs only");
+			else
+				opt.resv_port = 1;
 			break;
 		case LONG_OPT_USE_MIN_NODES:
 			opt.job_flags |= USE_MIN_NODES;
@@ -2001,6 +2071,7 @@ static void _proc_get_user_env(char *optarg)
 	else if ((end_ptr[0] == 'l') || (end_ptr[0] == 'L'))
 		opt.get_user_env_mode = 2;
 }
+
 static void _set_bsub_options(int argc, char **argv) {
 
 	int opt_char, option_index = 0;
@@ -2153,7 +2224,14 @@ static void _set_pbs_options(int argc, char **argv)
 	       != -1) {
 		switch (opt_char) {
 		case 'a':
-			opt.begin = parse_time(optarg, 0);
+			if (_check_jobpack__opt("-a")) {
+				opt.begin = parse_time(optarg, 0);
+				if (errno == ESLURM_INVALID_TIME_VALUE) {
+					error("Invalid time specification %s",
+					optarg);
+					exit(error_exit);
+				}
+			}
 			break;
 		case 'A':
 			xfree(opt.account);
@@ -2171,7 +2249,8 @@ static void _set_pbs_options(int argc, char **argv)
 				opt.efname = xstrdup(optarg);
 			break;
 		case 'h':
-			opt.hold = true;
+			if (_check_jobpack__opt("-h"))
+				opt.hold = true;
 			break;
 		case 'I':
 			break;
@@ -2212,28 +2291,31 @@ static void _set_pbs_options(int argc, char **argv)
 			else
 				opt.ofname = xstrdup(optarg);
 			break;
-		case 'p': {
-			long long tmp_nice;
-			if (optarg)
-				tmp_nice = strtoll(optarg, NULL, 10);
-			else
-				tmp_nice = 100;
-			if (llabs(tmp_nice) > (NICE_OFFSET - 3)) {
-				error("Nice value out of range (+/- %u). Value "
-				      "ignored", NICE_OFFSET - 3);
-				tmp_nice = 0;
-			}
-			if (tmp_nice < 0) {
-				uid_t my_uid = getuid();
-				if ((my_uid != 0) &&
-				    (my_uid != slurm_get_slurm_user_id())) {
-					error("Nice value must be "
-					      "non-negative, value ignored");
+		case 'p':{
+			if (_check_jobpack__opt("-p")) {
+				long long tmp_nice;
+				if (optarg)
+					tmp_nice = strtoll(optarg, NULL, 10);
+				else
+					tmp_nice = 100;
+				if (llabs(tmp_nice) > (NICE_OFFSET - 3)) {
+					error("Nice value out of range (+/- %u). Value "
+						"ignored", NICE_OFFSET - 3);
 					tmp_nice = 0;
 				}
-			}
+				if (tmp_nice < 0) {
+					uid_t my_uid = getuid();
+					if ((my_uid != 0) &&
+						(my_uid != slurm_get_slurm_user_id())) {
+						error("Nice value must be "
+							"non-negative, value ignored");
+						tmp_nice = 0;
+					}
+				}	
+			opt.nice = (int) tmp_nice;
 			opt.nice = (int) tmp_nice;
 			break;
+			}
 		}
 		case 'q':
 			xfree(opt.partition);
@@ -2264,7 +2346,19 @@ static void _set_pbs_options(int argc, char **argv)
 				}
 			} else if (!strncasecmp(optarg, "depend=", 7)) {
 				xfree(opt.dependency);
-				opt.dependency = xstrdup(optarg+7);
+				if ((packjob == true) &&
+				    (strcmp(optarg, "pack") == 0)) {
+					opt.dependency = xstrdup(optarg);
+					break;
+				}
+				if (_check_jobpack__opt("-W")) {
+					opt.dependency = xstrdup(optarg+7);
+				}
+				else {
+					if (packjob == true)
+						opt.dependency =
+							xstrdup("pack");
+				}
 			} else {
 				verbose("Ignored PBS attributes: %s", optarg);
 			}

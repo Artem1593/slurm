@@ -357,6 +357,7 @@ spawn_resp_send_to_stepd(spawn_resp_t *resp, char *node)
 	Buf buf;
 	int rc;
 	uint16_t cmd;
+	hostlist_t hl;
 
 	buf = init_buf(1024);
 
@@ -364,9 +365,11 @@ spawn_resp_send_to_stepd(spawn_resp_t *resp, char *node)
 	pack16(cmd, buf);
 	spawn_resp_pack(resp, buf);
 
-	rc = slurm_forward_data(&node, tree_sock_addr,
+	hl = hostlist_create(node);
+	rc = tree_msg_to_stepds(hl,
 				get_buf_offset(buf),
 				get_buf_data(buf));
+	hostlist_destroy(hl);
 	free_buf(buf);
 	return rc;
 }
@@ -610,6 +613,8 @@ _setup_exec_srun(spawn_req_t *req)
 				job_info.pmi_jobid);
 	env_array_overwrite_fmt(&env, PMI2_PMI_JOBID_ENV, "%s-%u",
 				job_info.pmi_jobid, req->seq);
+	env_array_overwrite_fmt(&env, PMI2_PMI_STEPID_ENV, "%s",
+				job_info.pmi_stepid);
 	env_array_overwrite_fmt(&env, PMI2_SPAWN_SEQ_ENV, "%u", req->seq);
 	env_array_overwrite_fmt(&env, PMI2_SPAWNER_PORT_ENV, "%hu",
 				tree_info.pmi_port);

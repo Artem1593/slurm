@@ -95,6 +95,7 @@
 #include "src/slurmctld/srun_comm.h"
 #include "src/slurmctld/state_save.h"
 #include "src/slurmctld/trigger_mgr.h"
+#include "src/slurmctld/port_mgr.h"
 
 #include "src/plugins/select/bluegene/bg_enums.h"
 
@@ -215,6 +216,7 @@ static void  _slurm_rpc_comp_msg_list(composite_msg_t * comp_msg,
 				      int timeout);
 static void  _slurm_rpc_assoc_mgr_info(slurm_msg_t * msg);
 static void  _slurm_rpc_persist_init(slurm_msg_t *msg, connection_arg_t *arg);
+static char *_resv_ports_jobpack(struct job_record *job_ptr);
 
 extern diag_stats_t slurmctld_diag_stats;
 
@@ -1196,6 +1198,15 @@ static void _slurm_rpc_allocate_resources(slurm_msg_t * msg)
 				cpu_array_cnt));
 		}
 
+		if (job_ptr->details->env_cnt) {
+			alloc_msg.env_size = job_ptr->details->env_cnt;
+			alloc_msg.environment = xmalloc(sizeof(char *) *
+							alloc_msg.env_size);
+			for (i = 0; i < alloc_msg.env_size; i++) {
+				alloc_msg.environment[i] =
+					xstrdup(job_ptr->details->env_sup[i]);
+			}
+		}
 		alloc_msg.error_code     = error_code;
 		alloc_msg.job_id         = job_ptr->job_id;
 		alloc_msg.node_cnt       = job_ptr->node_cnt;
@@ -1246,6 +1257,7 @@ static void _slurm_rpc_allocate_resources(slurm_msg_t * msg)
 		}
 		if (job_ptr->resv_name)
 			alloc_msg.resv_name = xstrdup(job_ptr->resv_name);
+
 
 		/* This check really isn't needed, but just doing it
 		 * to be more complete.
@@ -2047,6 +2059,7 @@ static void _slurm_rpc_complete_job_allocation(slurm_msg_t * msg)
 
 	/* do RPC call */
 	/* Mark job and/or job step complete */
+
 	error_code = job_complete(comp_msg->job_id, uid,
 				  false, false, comp_msg->job_rc);
 	if (error_code)
@@ -2972,6 +2985,22 @@ static void _slurm_rpc_job_alloc_info_lite(slurm_msg_t * msg)
 				job_info_resp_msg.environment[i] =
 					xstrdup(job_ptr->details->env_sup[i]);
 			}
+		}
+		if (job_ptr->batch_flag == 0 && job_ptr->resv_port_flag &&
+		    job_ptr->resv_ports == NULL) {
+			char *ports = _resv_ports_jobpack(job_ptr);
+			char *tmp = xmalloc(100);
+			sprintf (tmp, "SLURM_RESV_PORTS_PACK_GROUP_%d=%s",
+				 job_ptr->group_number, ports);
+			job_info_resp_msg.environment =
+			        xrealloc(job_info_resp_msg.environment,
+					 sizeof(char *) *
+					 job_info_resp_msg.env_size + 1);
+			job_info_resp_msg.environment[
+					 job_info_resp_msg.env_size] =
+			        xstrdup(tmp);
+			job_info_resp_msg.env_size++;
+			xfree(tmp);
 		}
 		unlock_slurmctld(job_read_lock);
 
@@ -6236,4 +6265,24 @@ end_it:
 
 	/* Don't free this here, it will be done elsewhere */
 	//slurm_persist_conn_destroy(persist_conn);
+}
+
+static char *_resv_ports_jobpack(struct job_record *job_ptr)
+{
+	char *resv_ports;
+
+	job_ptr->resv_port_cnt = job_ptr->node_cnt;
+	int i = resv_port_alloc_jobpack(job_ptr);
+	if (i != SLURM_SUCCESS) {
+	        error("failed to reserve node ports assigned to job %u",
+		      job_ptr->job_id);
+		return NULL;
+	}
+	else {
+	        resv_ports = xstrdup(job_ptr->resv_ports);
+		debug("job %u reserved port(s) %s", job_ptr->job_id,
+		      job_ptr->resv_ports);
+	}
+
+	return resv_ports;
 }

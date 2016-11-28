@@ -80,7 +80,9 @@ typedef struct fname {
 typedef struct srun_job {
 	int fir_nodeid;
 	uint32_t jobid;		/* assigned job id 	                  */
+	uint32_t mpi_jobid;	/* assigned MPI job id 	                  */
 	uint32_t stepid;	/* assigned step id 	                  */
+	bool pack_member;	/* is a member of a job pack */
 
 	uint32_t cpu_count;	/* allocated CPUs */
 	uint32_t nhosts;	/* node count */
@@ -134,11 +136,18 @@ extern srun_job_t * job_create_allocation(
 extern void init_srun(int ac, char **av,
 		      log_options_t *logopt, int debug_level,
 		      bool handle_signals);
+extern void init_srun_jobpack(int ac, char **av,
+		      log_options_t *logopt, int debug_level,
+		      bool handle_signals);
 
 extern void create_srun_job(srun_job_t **p_job, bool *got_alloc,
 			    bool slurm_started, bool handle_signals);
+extern void create_srun_jobpack(srun_job_t **p_job, bool *got_alloc,
+			    bool slurm_started, bool handle_signals);
 extern void pre_launch_srun_job(srun_job_t *job, bool slurm_started,
 				bool handle_signals);
+extern void pre_launch_srun_job_pack(srun_job_t *job, bool slurm_started,
+		bool handle_signals);
 
 extern void fini_srun(srun_job_t *job, bool got_alloc, uint32_t *global_rc,
 		      bool slurm_started);

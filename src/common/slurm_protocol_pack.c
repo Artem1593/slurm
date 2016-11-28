@@ -8783,6 +8783,7 @@ _pack_job_desc_msg(job_desc_msg_t * job_desc_ptr, Buf buffer,
 	uint8_t uint8_tmp = 0;
 
 	/* load the data values */
+
 	if (protocol_version >= SLURM_17_02_PROTOCOL_VERSION) {
 		packstr(job_desc_ptr->clusters, buffer);
 		pack16(job_desc_ptr->contiguous, buffer);

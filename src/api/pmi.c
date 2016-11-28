@@ -218,9 +218,9 @@ int PMI_Init( int *spawned )
 		goto replay;
 
 	env = getenv("SLURM_JOB_ID");
-	if (env)
+	if (env) {
 		pmi_jobid = atoi(env);
-	else
+	} else
 		pmi_jobid = 0;
 
 	env = getenv("SLURM_STEPID");
@@ -252,6 +252,33 @@ int PMI_Init( int *spawned )
 		pmi_rank = 0;
 
 	pmi_init = 1;
+
+	env = getenv("PMI_JOBID");
+	if (env) {
+		const char s[2] = ".";
+		pmi_jobid = atoi(strtok(env, s));
+	}
+	env = getenv("PMI_STEPID");
+	if (env) {
+		pmi_stepid = atoi(env);
+	}
+
+	env = getenv("PMI_RANK");
+	if (env) {
+		pmi_rank = atoi(env);
+	}
+
+	env = getenv("PMI_SIZE");
+	if (env) {
+		pmi_size = atoi(env);
+	}
+
+	if (pmi_debug) {
+		fprintf(stderr, "pmi_jobid=%ld\n", pmi_jobid);
+		fprintf(stderr, "pmi_stepid=%ld\n", pmi_stepid);
+		fprintf(stderr, "pmi_rank=%d\n", pmi_rank);
+		fprintf(stderr, "pmi_size=%d\n", pmi_size);
+	}
 
 replay:	if (pmi_spawned)
 		*spawned = PMI_TRUE;
@@ -1953,11 +1980,11 @@ inline static void _kvs_dump(void)
 	int i, j;
 
 	for (i=0; i<kvs_rec_cnt; i++) {
-		fprintf(stderr, "name=%s state=%u cnt=%u inx=%u\n",
+		info("name=%s state=%u cnt=%u inx=%u",
 			kvs_recs[i].kvs_name, kvs_recs[i].kvs_state,
 			kvs_recs[i].kvs_cnt, kvs_recs[i].kvs_inx);
 		for (j=0; j<kvs_recs[i].kvs_cnt; j++) {
-			fprintf(stderr, "  state=%u key=%s value=%s\n",
+			info("  state=%u key=%s value=%s",
 				kvs_recs[i].kvs_key_states[j],
 				kvs_recs[i].kvs_keys[j],
 				kvs_recs[i].kvs_values[j]);

@@ -398,7 +398,6 @@ extern void srun_job_complete (struct job_record *job_ptr)
 	struct step_record *step_ptr;
 
 	xassert(job_ptr);
-
 	if (job_ptr->other_port && job_ptr->alloc_node && job_ptr->resp_host) {
 		addr = xmalloc(sizeof(struct sockaddr_in));
 		slurm_set_addr(addr, job_ptr->other_port, job_ptr->resp_host);

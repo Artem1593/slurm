@@ -50,6 +50,7 @@
 #include <stdio.h>
 #include <stdlib.h>		/* getenv     */
 #include <string.h>		/* strcpy, strncasecmp */
+#include <errno.h>
 #include <sys/param.h>		/* MAXPATHLEN */
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -57,7 +58,9 @@
 #include <unistd.h>
 
 #include "slurm/slurm.h"
+#include <slurm/slurm_errno.h>
 #include "src/common/cpu_frequency.h"
+#include "src/common/hostlist.h"
 #include "src/common/list.h"
 #include "src/common/log.h"
 #include "src/common/optz.h"
@@ -121,6 +124,8 @@
 #define OPT_DELAY_BOOT  0x24
 #define OPT_INT64	0x25
 #define OPT_USE_MIN_NODES 0x26
+#define OPT_MPI_COMBINE 0x27
+
 
 /* generic getopt_long flags, integers and *not* valid characters */
 #define LONG_OPT_HELP        0x100
@@ -201,15 +206,22 @@
 #define LONG_OPT_PRIORITY        0x160
 #define LONG_OPT_ACCEL_BIND      0x161
 #define LONG_OPT_USE_MIN_NODES   0x162
+#define LONG_OPT_MPI_COMBINE     0x163
 #define LONG_OPT_MCS_LABEL       0x165
 #define LONG_OPT_DEADLINE        0x166
 #define LONG_OPT_DELAY_BOOT      0x167
+#define LONG_OPT_TASK_GROUP      0x168
+#define LONG_OPT_PACK_GROUP      0x169
 
 extern char **environ;
+extern bool packjob;
+extern bool packleader;
 
 /*---- global variables, defined in opt.h ----*/
 int _verbose;
 opt_t opt;
+int mpi_curtaskid;
+int mpi_curnodecnt;
 int error_exit = 1;
 int immediate_exit = 1;
 char *mpi_type = NULL;
@@ -233,13 +245,16 @@ static void _opt_default(void);
 /* set options based upon env vars  */
 static void _opt_env(void);
 
+/* set options based upon pack_group env vars  */
+static void _opt_env_pack(uint32_t group_number);
+
 static void _opt_args(int argc, char **argv);
 
 /* list known options and their settings  */
 static void  _opt_list(void);
 
 /* verify options sanity  */
-static bool _opt_verify(void);
+static bool _opt_verify(int group_number);
 
 static void _process_env_var(env_vars_t *e, const char *val);
 static char *_read_file(char *fname);
@@ -248,6 +263,38 @@ static void  _usage(void);
 static bool  _valid_node_list(char **node_list_pptr);
 
 /*---[ end forward declarations of static functions ]---------------------*/
+
+
+void copy_opt_struct(opt_t *to, opt_t *from)
+{
+	memcpy(to, from, sizeof(opt_t));
+}
+
+void copy_env_struct(env_t *to, env_t *from)
+{
+	memcpy(to, from, sizeof(env_t));
+}
+
+void copy_srun_job_struct(srun_job_t *to, srun_job_t *from)
+{
+	memcpy(to, from, sizeof(srun_job_t));
+}
+
+void copy_resp_struct(resource_allocation_response_msg_t *to,
+		      resource_allocation_response_msg_t *from)
+{
+	memcpy(to, from, sizeof(resource_allocation_response_msg_t));
+}
+
+static bool _check_jobpack__opt(char *option)
+{
+	if (packjob == true) {
+		info("WARNING - option %s ignored, allowed for packleader "
+		     "only", option);
+		return false;
+	}
+	return true;
+}
 
 int initialize_and_process_args(int argc, char *argv[])
 {
@@ -260,7 +307,7 @@ int initialize_and_process_args(int argc, char *argv[])
 	/* initialize options with argv */
 	_opt_args(argc, argv);
 
-	if (!_opt_verify())
+	if (!_opt_verify(-1))
 		exit(error_exit);
 
 	if (_verbose)
@@ -269,6 +316,45 @@ int initialize_and_process_args(int argc, char *argv[])
 	if (opt.launch_cmd) {
 		char *launch_type = slurm_get_launch_type();
 		if (!xstrcmp(launch_type, "launch/slurm")) {
+			error("--launch-cmd option is invalid with %s",
+			      launch_type);
+			xfree(launch_type);
+			exit(1);
+		}
+		xfree(launch_type);
+		/* Massage ntasks value earlier than normal */
+		if (!opt.ntasks_set)
+			opt.ntasks = _get_task_count();
+		launch_g_create_job_step(NULL, 0, NULL, NULL);
+		exit(0);
+	}
+
+	return 1;
+
+}
+
+int initialize_and_process_args_jobpack(int argc, char *argv[],
+					uint32_t group_number)
+{
+
+	/* initialize option defaults */
+	_opt_default();
+
+	/* initialize options with env vars */
+	_opt_env_pack(group_number);
+
+	/* initialize options with argv */
+	_opt_args(argc, argv);
+
+	if (!_opt_verify(group_number))
+		exit(error_exit);
+
+	if (_verbose > 3)
+		_opt_list();
+
+	if (opt.launch_cmd) {
+		char *launch_type = slurm_get_launch_type();
+		if (!strcmp(launch_type, "launch/slurm")) {
 			error("--launch-cmd option is invalid with %s",
 			      launch_type);
 			xfree(launch_type);
@@ -453,6 +539,7 @@ static void _opt_default(void)
 	opt.jobid    = NO_VAL;
 	opt.jobid_set = false;
 	opt.dependency = NULL;
+	opt.pack_group = NULL;
 	opt.account  = NULL;
 	opt.comment  = NULL;
 	opt.qos      = NULL;
@@ -560,6 +647,9 @@ static void _opt_default(void)
 	opt.power_flags = 0;
 	opt.mcs_label = NULL;
 	opt.delay_boot = NO_VAL;
+	opt.ngrpidx = 0;
+	opt.groupidx = NULL;
+	opt.mpi_combine = true;
 }
 
 /*---[ env var processing ]-----------------------------------------------*/
@@ -622,6 +712,7 @@ env_vars_t env_vars[] = {
 {"SLURM_MEM_PER_NODE",	OPT_INT64,	&opt.pn_min_memory, NULL             },
 {"SLURM_MLOADER_IMAGE", OPT_STRING,     &opt.mloaderimage,  NULL             },
 {"SLURM_MPI_TYPE",      OPT_MPI,        NULL,               NULL             },
+{"SLURM_MPI_COMBINE",   OPT_MPI_COMBINE, NULL,              NULL             },
 {"SLURM_NCORES_PER_SOCKET",OPT_NCORES,  NULL,               NULL             },
 {"SLURM_NETWORK",       OPT_STRING,     &opt.network,    &opt.network_set_env},
 {"SLURM_NNODES",        OPT_NODES,      NULL,               NULL             },
@@ -652,6 +743,7 @@ env_vars_t env_vars[] = {
 {"SLURM_STDINMODE",     OPT_STRING,     &opt.ifname,        NULL             },
 {"SLURM_STDOUTMODE",    OPT_STRING,     &opt.ofname,        NULL             },
 {"SLURM_TASK_EPILOG",   OPT_STRING,     &opt.task_epilog,   NULL             },
+{"SLURM_PACK_GROUP",    OPT_STRING,     &opt.pack_group,    NULL             },
 {"SLURM_TASK_PROLOG",   OPT_STRING,     &opt.task_prolog,   NULL             },
 {"SLURM_THREAD_SPEC",   OPT_THREAD_SPEC,NULL,               NULL             },
 {"SLURM_THREADS",       OPT_INT,        &opt.max_threads,   NULL             },
@@ -691,6 +783,27 @@ static void _opt_env(void)
 	}
 }
 
+static void _opt_env_pack(uint32_t group_number)
+{
+	char       *val = NULL;
+	env_vars_t *e   = env_vars;
+	char *name;
+
+	debug("_opt_env_pack: group_number = %d", group_number);
+
+	while (e->var) {
+		name = xmalloc(strlen(e->var) + 16);
+		sprintf(name, "%s_PACK_GROUP_%d", e->var, group_number);
+		if ((val = getenv(name)) != NULL &&
+		    strstr(name, "SLURM_RESV_PORTS_PACK_GROUP_") == NULL) {
+			debug("_opt_env_pack: name = %s, value = %s", name,
+			      val);
+			_process_env_var(e, val);
+		}
+		xfree(name);
+		e++;
+	}
+}
 
 static void
 _process_env_var(env_vars_t *e, const char *val)
@@ -867,6 +980,19 @@ _process_env_var(env_vars_t *e, const char *val)
 		mpi_initialized = true;
 		break;
 
+	case OPT_MPI_COMBINE:
+		if (strcmp(val, "yes") == 0)
+			opt.mpi_combine = true;
+		else if (strcmp(val, "no") == 0)
+			opt.mpi_combine = false;
+		else {
+			error("\"%s=%s\" -- invalid MPI_COMBINE, "
+			      " must be yes or no.",
+			      e->var, val);
+			exit(error_exit);
+		}
+		break;
+
 	case OPT_SIGNAL:
 		if (get_signal_opts((char *)val, &opt.warn_signal,
 				    &opt.warn_time, &opt.warn_flags)) {
@@ -906,6 +1032,87 @@ _process_env_var(env_vars_t *e, const char *val)
 		/* do nothing */
 		break;
 	}
+}
+
+
+/*
+ * create array of pack_group indexes in opt_t
+ */
+static void
+_parse_pack_group(const char *pack_group)
+{
+
+	struct _range *ranges = NULL;
+	int capacity = 0;
+	int nr = 0;
+	int tglen, i, j, k;
+	char *p, *end;
+	char cur_tok[1024];
+	uint32_t grp;
+	if (pack_group == NULL)
+		return;
+
+	tglen = strlen(pack_group);
+	if (pack_group[0] != '[') {
+		if (pack_group[tglen-1] == ']') {
+			error("JPCK: --pack-group=%s has unmatched braces",
+					pack_group);
+			return;
+		}
+		if (strchr(pack_group,',') || strchr(pack_group,'-')) {
+			error("JPCK: --pack-group=%s has , or - without braces",
+					pack_group);
+			return;
+
+		}
+		grp = (uint32_t) strtol(pack_group, &end, 10);
+		opt.ngrpidx = 1;
+		xfree(opt.groupidx);
+		opt.groupidx = (uint32_t *) xmalloc(opt.ngrpidx *
+						    sizeof(uint32_t));
+		opt.groupidx[0] = grp;
+		debug("JPCK: groupidx[0]=%d", 0);
+		return;
+	}
+
+	strncpy(cur_tok, pack_group, 1024);
+	if ((p = strrchr(cur_tok, '[')) != NULL) {
+		char *q;
+		*p++ = '\0';
+		if ((q = strchr(p, ']'))) {
+			if (q[1] != '\0')
+				goto error;
+			*q = '\0';
+			nr = parse_range_list(p, &ranges, &capacity, 1024, 1);
+			if (nr < 0)
+				goto error;
+			for (i=0; i<nr; i++) {
+				debug("JPCK: nr=%d range[%d] lo=%ld,hi=%ld,"
+				      "width=%d",nr,i,ranges[i].lo,ranges[i].hi,
+				      ranges[i].width);
+			}
+		}
+	}
+	xfree(opt.groupidx);
+	opt.ngrpidx = 0;
+	for (i=0; i < nr; i++) {
+		opt.ngrpidx += ((ranges[i].hi - ranges[i].lo) + 1);
+	}
+	opt.groupidx = (uint32_t *) xmalloc(opt.ngrpidx * sizeof(uint32_t));
+	k = 0;
+	for (i=0; i < nr; i++) {
+		for (j=ranges[i].lo; j<=ranges[i].hi; j++) {
+			opt.groupidx[k] = j;
+			debug("JPCK: groupidx[%d]=%d", k, j);
+			k++;
+		}
+	}
+	xfree(ranges);
+	return;
+error:
+	errno = EINVAL;
+	xfree(ranges);
+	slurm_seterrno(errno);
 }
 
 /*
@@ -1016,6 +1223,7 @@ static void _set_options(const int argc, char **argv)
 		{"minthreads",       required_argument, 0, LONG_OPT_MINTHREADS},
 		{"mloader-image",    required_argument, 0, LONG_OPT_MLOADER_IMAGE},
 		{"mpi",              required_argument, 0, LONG_OPT_MPI},
+		{"mpi-combine",      required_argument, 0, LONG_OPT_MPI_COMBINE},
 		{"msg-timeout",      required_argument, 0, LONG_OPT_TIMEO},
 		{"multi-prog",       no_argument,       0, LONG_OPT_MULTI},
 		{"network",          required_argument, 0, LONG_OPT_NETWORK},
@@ -1043,6 +1251,7 @@ static void _set_options(const int argc, char **argv)
 		{"spread-job",       no_argument,       0, LONG_OPT_SPREAD_JOB},
 		{"switches",         required_argument, 0, LONG_OPT_REQ_SWITCH},
 		{"task-epilog",      required_argument, 0, LONG_OPT_TASK_EPILOG},
+		{"pack-group",       required_argument, 0, LONG_OPT_PACK_GROUP},
 		{"task-prolog",      required_argument, 0, LONG_OPT_TASK_PROLOG},
 		{"tasks-per-node",   required_argument, 0, LONG_OPT_NTASKSPERNODE},
 		{"test-only",        no_argument,       0, LONG_OPT_TEST_ONLY},
@@ -1122,7 +1331,18 @@ static void _set_options(const int argc, char **argv)
 			break;
 		case (int)'d':
 			xfree(opt.dependency);
-			opt.dependency = xstrdup(optarg);
+			if ((packjob == true) &&
+			    (strcmp(optarg, "pack") == 0)) {
+				opt.dependency = xstrdup(optarg);
+				break;
+			}
+			if (_check_jobpack__opt("-d")) {
+				opt.dependency = xstrdup(optarg);
+			}
+			else {
+				if (packjob == true)
+					opt.dependency = xstrdup("pack");
+			}
 			break;
 		case (int)'D':
 			opt.cwd_set = true;
@@ -1152,7 +1372,8 @@ static void _set_options(const int argc, char **argv)
 				exit(error_exit);
 			break;
 		case (int)'H':
-			opt.hold = true;
+			if (_check_jobpack__opt("-H"))
+				opt.hold = true;
 			break;
 		case (int)'i':
 			if (opt.pty) {
@@ -1167,10 +1388,13 @@ static void _set_options(const int argc, char **argv)
 				opt.ifname = xstrdup(optarg);
 			break;
 		case (int)'I':
-			if (optarg)
-				opt.immediate = strtol(optarg, NULL, 10);
-			else
-				opt.immediate = DEFAULT_IMMEDIATE;
+			if (_check_jobpack__opt("-I")) {
+				if (optarg)
+					opt.immediate = strtol(optarg, NULL,
+							       10);
+				else
+					opt.immediate = DEFAULT_IMMEDIATE;
+			}
 			break;
 		case (int)'j':
 			opt.join = true;
@@ -1252,10 +1476,22 @@ static void _set_options(const int argc, char **argv)
 		case (int)'P':
 			verbose("-P option is deprecated, use -d instead");
 			xfree(opt.dependency);
-			opt.dependency = xstrdup(optarg);
+			if ((packjob == true) &&
+			    (strcmp(optarg, "pack") == 0)) {
+				opt.dependency = xstrdup(optarg);
+				break;
+			}
+			if (_check_jobpack__opt("-P")) {
+				opt.dependency = xstrdup(optarg);
+			}
+			else {
+				if (packjob == true)
+					opt.dependency = xstrdup("pack");
+			}
 			break;
 		case (int)'q':
-			opt.quit_on_intr = true;
+			if (_check_jobpack__opt("-q"))
+				opt.quit_on_intr = true;
 			break;
 		case (int) 'Q':
 			opt.quiet++;
@@ -1276,7 +1512,8 @@ static void _set_options(const int argc, char **argv)
 			break;
 		case (int)'t':
 			xfree(opt.time_limit_str);
-			opt.time_limit_str = xstrdup(optarg);
+			if (_check_jobpack__opt("-t"))
+				opt.time_limit_str = xstrdup(optarg);
 			break;
 		case (int)'T':
 			opt.max_threads =
@@ -1298,7 +1535,8 @@ static void _set_options(const int argc, char **argv)
 			opt.nodelist = xstrdup(optarg);
 			break;
 		case (int)'W':
-			opt.max_wait = _get_int(optarg, "wait", false);
+			if (_check_jobpack__opt("-W"))
+				opt.max_wait = _get_int(optarg, "wait", false);
 			break;
 		case (int)'x':
 			xfree(opt.exc_nodes);
@@ -1307,7 +1545,8 @@ static void _set_options(const int argc, char **argv)
 				exit(error_exit);
 			break;
 		case (int)'X':
-			opt.disable_status = true;
+			if (_check_jobpack__opt("-X"))
+				opt.disable_status = true;
 			break;
 		case (int)'Z':
 			opt.no_alloc = true;
@@ -1419,8 +1658,24 @@ static void _set_options(const int argc, char **argv)
 				exit(error_exit);
 			}
 			break;
+		case LONG_OPT_MPI_COMBINE:
+			if (strcmp(optarg, "yes") == 0)
+				opt.mpi_combine = true;
+			else if (strcmp(optarg, "no") == 0)
+				opt.mpi_combine = false;
+			else {
+				error("\"--mpi-combine=%s\" -- invalid MPI_COMBINE, "
+				      " must be yes or no.", optarg);
+				exit(error_exit);
+			}
+			break;
 		case LONG_OPT_MPI:
 			xfree(mpi_type);
+			if ((packjob == true) && (opt.mpi_combine == true)) {
+				info ("WARNING - option --mpi ignored for "
+				      "pack member with --mpi-combine=yes");
+				break;
+			}
 			mpi_type = xstrdup(optarg);
 			if (mpi_hook_client_init((char *)optarg)
 			    == SLURM_ERROR) {
@@ -1445,6 +1700,11 @@ static void _set_options(const int argc, char **argv)
 			}
 			break;
 		case LONG_OPT_JOBID:
+			if ((packleader == true) || (packjob == true)) {
+				info ("WARNING - option --jobid ignored, "
+				      "not allowed for packleader or packjob");
+				break;
+			}
 			opt.jobid = _get_int(optarg, "jobid", true);
 			opt.jobid_set = true;
 			break;
@@ -1535,11 +1795,13 @@ static void _set_options(const int argc, char **argv)
 			opt.burst_buffer = _read_file(optarg);
 			break;
 		case LONG_OPT_BEGIN:
-			opt.begin = parse_time(optarg, 0);
-			if (errno == ESLURM_INVALID_TIME_VALUE) {
-				error("Invalid time specification %s",
-				      optarg);
-				exit(error_exit);
+			if (_check_jobpack__opt("--begin")) {
+				opt.begin = parse_time(optarg, 0);
+				if (errno == ESLURM_INVALID_TIME_VALUE) {
+					error("Invalid time specification %s",
+					optarg);
+					exit(error_exit);
+				}
 			}
 			break;
 		case LONG_OPT_MAIL_TYPE:
@@ -1594,6 +1856,8 @@ static void _set_options(const int argc, char **argv)
 			if (strcasecmp(optarg, "TOP") == 0) {
 				opt.priority = NO_VAL - 1;
 			} else {
+				priority = strtoll(optarg, NULL, 10);
+			if (_check_jobpack__opt("--priority")) 
 				priority = strtoll(optarg, NULL, 10);
 				if (priority < 0) {
 					error("Priority must be >= 0");
@@ -1770,7 +2034,8 @@ static void _set_options(const int argc, char **argv)
 			break;
 		case LONG_OPT_TIME_MIN:
 			xfree(opt.time_min_str);
-			opt.time_min_str = xstrdup(optarg);
+			if (_check_jobpack__opt("--time-min"))
+				opt.time_min_str = xstrdup(optarg);
 			break;
 		case LONG_OPT_GRES:
 			if (!xstrcasecmp(optarg, "help") ||
@@ -1827,6 +2092,16 @@ static void _set_options(const int argc, char **argv)
 			break;
 		case LONG_OPT_SPREAD_JOB:
 			opt.job_flags |= SPREAD_JOB;
+		case LONG_OPT_PACK_GROUP:
+			xfree(opt.pack_group);
+			if ((packleader == true) || (packjob == true)) {
+				info ("WARNING - option --pack-group ignored, "
+				      "not allowed for packleader or packjob");
+				break;
+			}
+			opt.pack_group = xstrdup(optarg);
+			debug("JPCK: PACK-GROUP srun-opt pack_group=%s",opt.pack_group);
+			_parse_pack_group(opt.pack_group);
 			break;
 		case LONG_OPT_DELAY_BOOT:
 			tmp_int = time_str2secs(optarg);
@@ -2006,7 +2281,7 @@ static void _opt_args(int argc, char **argv)
  * _opt_verify : perform some post option processing verification
  *
  */
-static bool _opt_verify(void)
+static bool _opt_verify(int group_number)
 {
 	bool verified = true;
 	hostlist_t hl = NULL;
@@ -2287,7 +2562,15 @@ static bool _opt_verify(void)
 		/*
 		 *  make sure # of procs >= min_nodes
 		 */
-		if ((opt.ntasks < opt.min_nodes) && (opt.ntasks > 0)) {
+		int i;
+		bool check = true;
+		if (opt.ngrpidx > 0 && group_number == -1)
+			check = false;
+		for (i=0; i<opt.ngrpidx; i++) {
+			if (opt.groupidx[i] == group_number)
+				break;
+		}
+		if (check && (opt.ntasks < opt.min_nodes) && (opt.ntasks > 0)) {
 			info ("Warning: can't run %d processes on %d "
 			      "nodes, setting nnodes to %d",
 			      opt.ntasks, opt.min_nodes, opt.ntasks);
@@ -2514,6 +2797,61 @@ extern int   spank_unset_job_env(const char *name)
 	return 0;	/* not found */
 }
 
+extern int pelog_set_env(int overwrite)
+{
+	int i, j;
+	char *name, *value, *eq;
+	char *tmp_str = NULL;
+
+	for (i = 0; environ[i]; i++) {
+		if (strncmp(environ[i], "SLURM_JOB_NODELIST_PACK_GROUP_", 30) &&
+		    strncmp(environ[i], "SLURM_NUMPACK", 13) &&
+		    strncmp(environ[i], "SLURM_RESV_PORTS_PACK_GROUP_", 28))
+			continue;
+
+		name = xstrdup(environ[i]);
+		eq = strchr(name, (int)'=');
+		if (eq == NULL) {
+			xfree(name);
+			break;
+		}
+		*eq = '\0';
+		value = xstrdup(eq+1);
+		if (!strncmp(name, "SLURM_JOB_NODELIST_PACK_GROUP_", 30)) {
+			xstrcat(tmp_str, "SLURM_NODELIST_PACK_GROUP_");
+			xstrcat(tmp_str, &name[30]);
+		}
+		else
+			xstrcat(tmp_str, name);
+
+		bool found = false;
+		for (j = 0; j<opt.pelog_env_size && !found; j++) {
+			if (xstrncmp(opt.pelog_env[j], tmp_str,
+				     strlen(tmp_str))) continue;
+			env_array_overwrite_fmt(&opt.pelog_env, tmp_str, "%s",
+						value);
+			found = true;
+		}
+
+		if (!found) {
+			env_array_append_fmt(&opt.pelog_env, tmp_str, "%s",
+					     value);
+			opt.pelog_env_size++;
+		}
+		xfree(tmp_str);
+		xfree(name);
+		xfree(value);
+	}
+
+	if ((name == NULL) || (name[0] == '\0') ||
+	    (strchr(name, (int)'=') != NULL)) {
+		slurm_seterrno(EINVAL);
+		return -1;
+	}
+
+	return 0;
+}
+
 /* helper function for printing options
  *
  * warning: returns pointer to memory allocated on the stack.
@@ -2693,6 +3031,11 @@ static void _opt_list(void)
 	if (opt.resv_port_cnt != NO_VAL)
 		info("resv_port_cnt     : %d", opt.resv_port_cnt);
 	info("power             : %s", power_flags_str(opt.power_flags));
+	info("pack_group        : %s", opt.pack_group);
+	if (opt.mpi_combine)
+		info("mpi_combine : yes");
+	else
+		info("mpi_combine : yes");
 	str = print_commandline(opt.argc, opt.argv);
 	info("remote command    : `%s'", str);
 	if (opt.mcs_label)
@@ -2750,8 +3093,10 @@ static bool _under_parallel_debugger (void)
 
 static void _usage(void)
 {
- 	printf(
-"Usage: srun [-N nnodes] [-n ntasks] [-i in] [-o out] [-e err]\n"
+	printf(
+"Usage: srun job_description(0) [ : job_description(1)] [...] [ : job_description(n)] \n"
+"            Where job_descriptions is \n"
+"            [-N nnodes] [-n ntasks] [-i in] [-o out] [-e err]\n"
 "            [-c ncpus] [-r n] [-p partition] [--hold] [-t minutes]\n"
 "            [-D path] [--immediate[=secs]] [--overcommit] [--no-kill]\n"
 "            [--oversubscribe] [--label] [--unbuffered] [-m dist] [-J jobname]\n"
@@ -2760,8 +3105,8 @@ static void _usage(void)
 "            [--checkpoint-dir=dir] [--licenses=names] [--clusters=cluster_names]\n"
 "            [--restart-dir=dir] [--qos=qos] [--time-min=minutes]\n"
 "            [--contiguous] [--mincpus=n] [--mem=MB] [--tmp=MB] [-C list]\n"
-"            [--mpi=type] [--account=name] [--dependency=type:jobid]\n"
-"            [--launch-cmd] [--launcher-opts=options]\n"
+"            [--mpi=type] [mpi-combine=yes|no] [--account=name]\n"
+"            [--dependency=type:jobid] [--launch-cmd] [--launcher-opts=options]\n"
 "            [--kill-on-bad-exit] [--propagate[=rlimits] [--comment=name]\n"
 "            [--cpu_bind=...] [--mem_bind=...] [--network=type]\n"
 "            [--ntasks-per-node=n] [--ntasks-per-socket=n] [reservation=name]\n"
@@ -2782,6 +3127,7 @@ static void _usage(void)
 "            [--bb=burst_buffer_spec] [--bbf=burst_buffer_file]\n"
 "            [--bcast=<dest_path>] [--compress[=library]]\n"
 "            [--acctg-freq=<datatype>=<interval>] [--delay-boot=mins]\n"
+"			 [--pack-group]\n"				
 "            [-w hosts...] [-x hosts...] [--use-min-nodes]\n"
 "            executable [args...]\n");
 
@@ -2792,7 +3138,8 @@ static void _help(void)
 	slurm_ctl_conf_t *conf;
 
         printf (
-"Usage: srun [OPTIONS...] executable [args...]\n"
+"Usage: srun job_description(0) [ : job_description(1)] [...] [ : job_description(n)] \n"
+"            Each job_descriptiong is [OPTIONS...] executable [args...]\n"
 "\n"
 "Parallel run options:\n"
 "  -A, --account=name          charge job to specified account\n"
@@ -2849,6 +3196,7 @@ static void _help(void)
 "                              changes\n"
 "      --mcs-label=mcs         mcs label if mcs plugin mcs/group is used\n"
 "      --mpi=type              type of MPI being used\n"
+"      --mpi-combine=yes|no    combine members of job_pack in one MPI_COMM_WORLD\n"
 "      --multi-prog            if set the program name specified is the\n"
 "                              configuration specification for multiple programs\n"
 "  -n, --ntasks=ntasks         number of tasks to run\n"
@@ -2883,6 +3231,7 @@ static void _help(void)
 "      --switches=max-switches{@max-time-to-wait}\n"
 "                              Optimum switches and max time to wait for optimum\n"
 "      --task-epilog=program   run \"program\" after launching task\n"
+"      --pack-group=[g[-g]]    list of pack groups to launch\n"
 "      --task-prolog=program   run \"program\" before launching task\n"
 "      --thread-spec=threads   count of reserved threads\n"
 "  -T, --threads=threads       set srun launch fanout\n"

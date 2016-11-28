@@ -174,9 +174,31 @@ typedef struct salloc_options {
 	time_t deadline;	/* --deadline                   */
 	uint32_t job_flags;	/* --kill_invalid_dep, --gres-flags */
 	uint32_t delay_boot;	/* --delay-boot			*/
+	int group_number;       /* pack group number */
+	bool resv_port_flag;    /* --resv-port option */
 } opt_t;
 
 extern opt_t opt;
+
+typedef struct {
+	bool packleader;
+	bool pack_job;
+	uint32_t job_id;
+	opt_t *opt;
+	char **env;
+	job_desc_msg_t *desc;
+	resource_allocation_response_msg_t *alloc;
+	uint32_t ac;
+	char **av;
+} pack_job_env_t;
+
+extern pack_job_env_t *pack_job_env;
+void copy_opt_struct(opt_t *to, opt_t *from);
+void copy_env(char ***to, char **from);
+void copy_job_desc_msg(job_desc_msg_t *to, job_desc_msg_t *from);
+void copy_alloc_struct(resource_allocation_response_msg_t *to,
+		       resource_allocation_response_msg_t *from);
+
 extern int error_exit;		/* exit code for slurm errors */
 extern int immediate_exit;	/* exit code for --imediate option & busy */
 

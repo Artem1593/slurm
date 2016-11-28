@@ -84,6 +84,8 @@ typedef struct {
 
 	int             id;	    /* local task id                        */
 	uint32_t        gtid;	    /* global task id                       */
+	uint32_t        mpi_ntasks; /* MPI number of tasks                  */
+	uint32_t        utaskid;    /* MPI taskid                           */
 	pid_t           pid;	    /* task pid                             */
 
 	char           *ifname;     /* standard input file name             */
@@ -130,6 +132,12 @@ typedef struct {
 	uint32_t       stepid; /* Current step id (or NO_VAL)               */
 	uint32_t       array_job_id;  /* job array master job ID            */
 	uint32_t       array_task_id; /* job array ID                       */
+	uint32_t       mpi_jobid;  /* MPI jobid (same for all steps)        */
+	uint32_t       mpi_stepid; /* MPI stepid (same for all steps)        */
+	uint32_t       mpi_ntasks; /* number of MPI tasks for all steps     */
+	uint32_t       mpi_nnodes; /* number of MPI nodes for all steps     */
+	uint32_t       mpi_stepfnodeid; /* first MPI nodeid for this step   */
+	uint32_t       mpi_stepftaskid; /* first MPI taskid for this step   */
 	uint32_t       nnodes; /* number of nodes in current job            */
 	uint32_t       ntasks; /* total number of tasks in current job      */
 	uint32_t       nodeid; /* relative position of this node in job     */
@@ -228,6 +236,9 @@ typedef struct {
 	int		non_smp;	/* Set if task IDs are not monotonically
 					 * increasing across all nodes, set only
 					 * native Cray systems */
+	uint32_t packjobid;		/* jobid of srun first step of the
+					 * jobpack */
+	uint32_t packstepid;		/* stepid of jobpack member */
 } stepd_step_rec_t;
 
 
@@ -243,6 +254,8 @@ srun_info_t * srun_info_create(slurm_cred_t *cred, slurm_addr_t *respaddr,
 void  srun_info_destroy(srun_info_t *srun);
 
 stepd_step_task_info_t * task_info_create(int taskid, int gtaskid,
+					  uint32_t mpi_ntasks,
+					  uint32_t mpi_stepftaskid,
 					  char *ifname, char *ofname,
 					  char *efname);
 

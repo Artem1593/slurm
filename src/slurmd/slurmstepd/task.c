@@ -317,20 +317,26 @@ extern char *build_path(char *fname, char **prog_env, char *cwd)
 static int
 _setup_mpi(stepd_step_rec_t *job, int ltaskid)
 {
-	mpi_plugin_task_info_t info[1];
+	mpi_plugin_task_info_t minfo[1];
 
-	info->jobid = job->jobid;
-	info->stepid = job->stepid;
-	info->nnodes = job->nnodes;
-	info->nodeid = job->nodeid;
-	info->ntasks = job->ntasks;
-	info->ltasks = job->node_tasks;
-	info->gtaskid = job->task[ltaskid]->gtid;
-	info->ltaskid = job->task[ltaskid]->id;
-	info->self = job->envtp->self;
-	info->client = job->envtp->cli;
+	minfo->jobid = job->mpi_jobid;
+	minfo->stepid = job->mpi_stepid;
+	minfo->nodeid = job->nodeid;
+	minfo->ntasks = job->mpi_ntasks;
+	minfo->nnodes = job->mpi_nnodes;
+	minfo->ltasks = job->node_tasks;
+	minfo->gtaskid = job->task[ltaskid]->utaskid;
+	minfo->ltaskid = job->task[ltaskid]->id;
+	minfo->self = job->envtp->self;
+	minfo->client = job->envtp->cli;
 
-	return mpi_hook_slurmstepd_task(info, &job->env);
+	/* set environment variables for PMI client */
+	env_array_overwrite_fmt(&job->env, "PMI_JOBID", "%u",minfo->jobid);
+	env_array_overwrite_fmt(&job->env, "PMI_STEPID", "%u",minfo->stepid);
+	env_array_overwrite_fmt(&job->env, "PMI_RANK", "%u", minfo->gtaskid);
+	env_array_overwrite_fmt(&job->env, "PMI_SIZE", "%u", minfo->ntasks);
+
+	return mpi_hook_slurmstepd_task(minfo, &job->env);
 }
 extern void block_daemon(void);
 
@@ -350,8 +356,9 @@ exec_task(stepd_step_rec_t *job, int i)
 		_make_tmpdir(job);
 
 	gtids = xmalloc(job->node_tasks * sizeof(uint32_t));
-	for (j = 0; j < job->node_tasks; j++)
+	for (j = 0; j < job->node_tasks; j++) {
 		gtids[j] = job->task[j]->gtid;
+	}
 	job->envtp->sgtids = _uint32_array_to_str(job->node_tasks, gtids);
 	xfree(gtids);
 

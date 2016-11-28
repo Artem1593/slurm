@@ -6,6 +6,8 @@
  *  Copyright (C) 2002-2007 The Regents of the University of California.
  *  Copyright (C) 2008-2010 Lawrence Livermore National Security.
  *  Portions Copyright (C) 2010-2015 SchedMD <http://www.schedmd.com>.
+ *  Portions related to job_pack copyright (C) 2015 Atos Inc.
+ *  		Written by Rod Schultz <rod.schultz@atos.net>.
  *  Produced at Lawrence Livermore National Laboratory (cf, DISCLAIMER).
  *  Written by Morris Jette <jette1@llnl.gov>
  *  CODE-OCEC-09-009. All rights reserved.
@@ -92,6 +94,7 @@
 #include "src/slurmctld/licenses.h"
 #include "src/slurmctld/locks.h"
 #include "src/slurmctld/node_scheduler.h"
+#include "src/slurmctld/port_mgr.h"
 #include "src/slurmctld/preempt.h"
 #include "src/slurmctld/proc_req.h"
 #include "src/slurmctld/reservation.h"
@@ -3659,6 +3662,19 @@ void dump_job_desc(job_desc_msg_t * job_specs)
 		       job_specs->spank_job_env[1],
 		       job_specs->spank_job_env[2]);
 
+	if (job_specs->pelog_env_size == 1)
+		debug3("   pelog_env=\"%s\"",
+		       job_specs->pelog_env[0]);
+	else if (job_specs->pelog_env_size == 2)
+		debug3("   pelog_env=%s,%s",
+		       job_specs->pelog_env[0],
+		       job_specs->pelog_env[1]);
+	else if (job_specs->pelog_env_size > 2)
+		debug3("   pelog_env=%s,%s,%s,...",
+		       job_specs->pelog_env[0],
+		       job_specs->pelog_env[1],
+		       job_specs->pelog_env[2]);
+
 	debug3("   stdin=%s stdout=%s stderr=%s",
 	       job_specs->std_in, job_specs->std_out, job_specs->std_err);
 
@@ -3924,6 +3940,15 @@ extern struct job_record *job_array_split(struct job_record *job_ptr)
 		for (i = 0; i < job_ptr->spank_job_env_size; i++) {
 			job_ptr_pend->spank_job_env[i] =
 				xstrdup(job_ptr->spank_job_env[i]);
+		}
+	}
+	if (job_ptr->pelog_env_size) {
+		job_ptr_pend->pelog_env =
+			xmalloc(sizeof(char *) *
+			(job_ptr->pelog_env_size + 1));
+		for (i = 0; i < job_ptr->pelog_env_size; i++) {
+			job_ptr_pend->pelog_env[i] =
+				xstrdup(job_ptr->pelog_env[i]);
 		}
 	}
 	job_ptr_pend->state_desc = xstrdup(job_ptr->state_desc);
@@ -4426,6 +4451,7 @@ extern int job_allocate(job_desc_msg_t * job_specs, int immediate,
 	}
 
 	if (error_code) {	/* fundamental flaw in job request */
+		debug("JPCK: BAD_CONSTRAINTS=%d", error_code);
 		job_ptr->job_state  = JOB_FAILED;
 		job_ptr->exit_code  = 1;
 		job_ptr->state_reason = FAIL_BAD_CONSTRAINTS;
@@ -4633,6 +4659,68 @@ static int _job_signal(struct job_record *job_ptr, uint16_t signal,
 }
 
 /*
+ * kill_job_pack - signal all jobs in the job_pack
+ *
+ * This function is currently only used to send SIGKILL to all member
+ * of a job pack, when SIGKILL is sent to any one member of the pack.
+ *
+ * IN pack_id - id of the pack leader of a job pack
+ * IN job_ptr - pointer to job record of the original job to be signaled
+ * IN signal - signal to send, SIGKILL == cancel the job
+ * IN flags  - see KILL_JOB_* flags in slurm.h
+ * IN uid - uid of requesting user
+ * IN preempt - true if job being preempted
+ * RET 0 on success, otherwise ESLURM error code
+ */
+static int _kill_job_pack(uint32_t pack_id, struct job_record *job_ptr,
+		uint16_t signal, uint16_t flags, uid_t uid, bool preempt)
+{
+	ListIterator dep_iter;
+	struct depend_spec *dep_ptr;
+	struct job_record *pack_ptr, *mbr_ptr;
+	uint64_t debug_flags;
+	debug_flags = slurm_get_debug_flags();
+	pack_ptr = find_job_record(pack_id);
+	if ((pack_ptr == NULL)
+	    || (pack_ptr->details == NULL)
+	    || (pack_ptr->details->depend_list == NULL)) {
+		/* Didn't find the leader, just kill the orginator */
+		return _job_signal(job_ptr, signal, flags, uid, preempt);
+	}
+	/* Iterate throiugh the members of the leader, killing them */
+	dep_iter = list_iterator_create(pack_ptr->details->depend_list);
+	dep_ptr = (struct depend_spec *) list_next(dep_iter);
+	while (dep_ptr != NULL) {
+		mbr_ptr = dep_ptr->job_ptr;
+		if (mbr_ptr == NULL) {
+			error("JPCK: job_ptr for member=%d in job_pack "
+			      "leader=%d is NULL", dep_ptr->job_id,
+			      job_ptr->job_id);
+			break;
+		}
+		if (!IS_JOB_COMPLETING(mbr_ptr)
+		    && !IS_JOB_FINISHED(mbr_ptr)) {
+			if (debug_flags & DEBUG_FLAG_JOB_PACK) {
+				info("JPCK: kill job_pack -- member=%d "
+				     "leader=%d", dep_ptr->job_id, pack_id);
+			}
+			_job_signal(mbr_ptr, signal, flags, uid, preempt);
+		}
+		dep_ptr = (struct depend_spec *) list_next(dep_iter);
+	}
+	list_iterator_destroy(dep_iter);
+
+	/* Finally, kill the leader */
+	if (debug_flags & DEBUG_FLAG_JOB_PACK) {
+		info("JPCK: kill job_pack --leader=%d org_job_signalled=%d",
+		      pack_id, job_ptr->job_id);
+	}
+	if (IS_JOB_COMPLETING(pack_ptr) || IS_JOB_FINISHED(pack_ptr))
+		return ESLURM_ALREADY_DONE;
+	return _job_signal(pack_ptr, signal, flags, uid, preempt);
+}
+
+/*
  * job_signal - signal the specified job
  * IN job_id - id of the job to be signaled
  * IN signal - signal to send, SIGKILL == cancel the job
@@ -4681,6 +4769,11 @@ extern int job_signal(uint32_t job_id, uint16_t signal, uint16_t flags,
 		return ESLURM_ACCESS_DENIED;
 	}
 
+	if ((signal == SIGKILL) && (job_ptr->pack_leader != 0)) {
+		/* Is a job_pack, kill all the members, including the leader */
+		return _kill_job_pack(job_ptr->pack_leader, job_ptr, signal,
+				      flags, uid, preempt);
+	}
 	return _job_signal(job_ptr, signal, flags, uid, preempt);
 }
 
@@ -4745,6 +4838,22 @@ extern int job_str_signal(char *job_id_str, uint16_t signal, uint16_t flags,
 		if (job_ptr && (job_ptr->array_task_id == NO_VAL) &&
 		    (job_ptr->array_recs == NULL)) {
 			/* This is a regular job, not a job array */
+			if (job_ptr->pack_leader!=0
+			    && job_ptr->pack_leader!=job_id) {
+				/* job is a pack member */
+				if (!(flags & KILL_FULL_JOB)) {
+					/* Not scancel --pack-member */
+					error("JPCK: use scancel --pack-member "
+					      "to cancel %d", job_id);
+					return ESLURM_JOB_PACK_CANCEL_MEMBER;
+				}
+				job_ptr->pack_leader = 0; /* remove from pack */
+				if (slurm_get_debug_flags()
+				    & DEBUG_FLAG_JOB_PACK) {
+					info("JPCK: scancel --pack-member %d",
+						job_id);
+				}
+			}
 			return job_signal(job_id, signal, flags, uid, preempt);
 		}
 
@@ -4843,7 +4952,20 @@ extern int job_str_signal(char *job_id_str, uint16_t signal, uint16_t flags,
 		rc = ESLURM_INVALID_JOB_ID;
 		goto endit;
 	}
-
+	if (job_ptr->pack_leader!=0 && job_ptr->pack_leader!=job_id) {
+		/* job is a pack member */
+		if (!(flags & KILL_FULL_JOB)) {
+			/* Not scancel --pack-member */
+			error("JPCK: use scancel --pack-member to cancel %d",
+				job_id);
+			rc = ESLURM_JOB_PACK_CANCEL_MEMBER;
+			goto endit;
+		}
+		job_ptr->pack_leader = 0; /* remove from the pack */
+		if (slurm_get_debug_flags() & DEBUG_FLAG_JOB_PACK) {
+			info("JPCK: scancel --pack-member %d", job_id);
+		}
+	}
 	if ((job_ptr->user_id != uid) && !validate_operator(uid) &&
 	    !assoc_mgr_is_user_acct_coord(acct_db_conn, uid,
 					  job_ptr->account)) {
@@ -5044,7 +5166,7 @@ extern int prolog_complete(uint32_t job_id,
  * global: job_list - pointer global job list
  *	last_job_update - time of last job table update
  */
-extern int job_complete(uint32_t job_id, uid_t uid, bool requeue,
+static int _job_complete(uint32_t job_id, uid_t uid, bool requeue,
 			bool node_fail, uint32_t job_return_code)
 {
 	struct node_record *node_ptr;
@@ -5225,11 +5347,147 @@ extern int job_complete(uint32_t job_id, uid_t uid, bool requeue,
 	if (job_comp_flag) {	/* job was running */
 		build_cg_bitmap(job_ptr);
 		deallocate_nodes(job_ptr, false, suspended, false);
+		resv_port_jobpack_free(job_ptr);
+		xfree(job_ptr->resv_port_array);
+		xfree(job_ptr->resv_ports);
 	}
 
 	info("%s: %s done", __func__, jobid2str(job_ptr, jbuf, sizeof(jbuf)));
 
 	return SLURM_SUCCESS;
+}
+
+/*
+ * job_complete - note the normal termination the specified job
+ * IN job_id - id of the job which completed
+ * IN uid - user id of user issuing the RPC
+ * IN requeue - job should be run again if possible
+ * IN node_fail - true of job terminated due to node failure
+ * IN job_return_code - job's return code, if set then set state to FAILED
+ * RET - 0 on success, otherwise ESLURM error code
+ * global: job_list - pointer global job list
+ *	last_job_update - time of last job table update
+ * Note: true job completion is _job_complete.
+ *       This is now a wrapper to handle job_pack completion.
+ */
+extern int job_complete(uint32_t job_id, uid_t uid, bool requeue,
+			bool node_fail, uint32_t job_return_code)
+{
+	int rc;
+	bool isleader = false;
+	ListIterator dpnd_iter;
+	struct depend_spec *ldr_dep_ptr;
+	struct job_record *job_ptr;
+	struct job_record *mbr_job;
+	uint64_t debug_flags;
+
+	debug_flags = slurm_get_debug_flags();
+	job_ptr = find_job_record(job_id);
+	if (job_ptr == NULL) {
+		error("JPCK: job_complete failed to find job=%d "
+			     "(assume ESLURM_ALREADY_DONE)", job_id);
+		return ESLURM_ALREADY_DONE;
+	}
+
+	/*
+	 * Check for a job_pack leader. If found, complete members too.
+	 * job_ptr represents job originally requested to complete
+	 */
+	if (job_ptr->details != NULL && job_ptr->details->depend_list!=NULL) {
+		/* Iterate over originators depend list, looking for members */
+		dpnd_iter = list_iterator_create(job_ptr->details->depend_list);
+		while ((ldr_dep_ptr = (struct depend_spec *)
+				      list_next(dpnd_iter))) {
+			if (ldr_dep_ptr->depend_type == SLURM_DEPEND_PACK) {
+				if (job_ptr->batch_flag > 0) {
+					/* Originator is member is a sbatch
+					 * or salloc. have to wait for leader */
+					if (debug_flags & DEBUG_FLAG_JOB_PACK) {
+						info("JPCK: pack member "
+						     "%d waiting for leader %d "
+					             "to complete", job_id,
+						     job_ptr->pack_leader);
+					}
+					return SLURM_SUCCESS;
+				} else {
+					/* Originator is member is
+					 * stand-alone-srun, can complete now */
+					if (debug_flags & DEBUG_FLAG_JOB_PACK) {
+						info("JPCK: pack member %d "
+						    "(leader %d) is completing",
+						     job_id,
+						     job_ptr->pack_leader);
+					}
+					return _job_complete(job_id, uid, false,
+							false, job_return_code);
+				}
+			}
+			if (ldr_dep_ptr->depend_type != SLURM_DEPEND_PACKLEADER)
+				continue;
+			isleader = true;
+			mbr_job = ldr_dep_ptr->job_ptr;
+			/* job_ptr is a pack leader.
+			 * mbr_job is one of its members, complete mbr_job */
+			if (mbr_job->job_state == JOB_COMPLETE
+			    || mbr_job->job_state == JOB_COMPLETING) {
+				if (debug_flags & DEBUG_FLAG_JOB_PACK) {
+					info("JPCK: skipping pack member %d, "
+					     "(already complete)",
+					     ldr_dep_ptr->job_id);
+				}
+				continue;
+			}
+			if (debug_flags & DEBUG_FLAG_JOB_PACK) {
+				info("JPCK: Leader %d completing pack member "
+				     "jobid=%d", job_id, ldr_dep_ptr->job_id);
+			}
+			/* only kill the packmember jobs if this is not
+			   a stand-alone srun, otherwise let the them
+			   complete in their own time (instead of killing
+			   them now) This is done to prevent timing issues
+			   when the packleader completes before the packmembers
+			   for stand-alone sruns. There may be a better way to
+			   handle this situation. */
+			if (job_ptr->batch_flag > 0) {
+				rc = _job_complete(ldr_dep_ptr->job_id, uid,
+					   false, false, job_return_code);
+			}
+			else
+				rc = SLURM_SUCCESS;
+
+			if ((debug_flags & DEBUG_FLAG_JOB_PACK)
+			    && (rc != SLURM_SUCCESS)) {
+				if (rc == ESLURM_ALREADY_DONE) {
+					info("JPCK: pack job %d is already "
+					     "complete", ldr_dep_ptr->job_id);
+				} else {
+					info("JPCK: Failed to complete pack "
+					     "job %d", ldr_dep_ptr->job_id);
+				}
+			}
+		}
+		list_iterator_destroy(dpnd_iter);
+		if (isleader) {
+			if (job_ptr->job_state == JOB_COMPLETE
+			    || job_ptr->job_state == JOB_COMPLETING) {
+				if ((slurm_get_debug_flags() &
+						DEBUG_FLAG_JOB_PACK)
+				    && ldr_dep_ptr) {
+
+					info("JPCK: skipping job pack leader "
+					     "%d, (already complete)",
+					     ldr_dep_ptr->job_id);
+				}
+				return SLURM_SUCCESS;
+			}
+			if ((slurm_get_debug_flags() & DEBUG_FLAG_JOB_PACK)
+			    && ldr_dep_ptr) {
+				info("JPCK: Completing job pack leader=%d",
+				     ldr_dep_ptr->job_id);
+			}
+		}
+	}
+	return _job_complete(job_id, uid, false, false, job_return_code);
 }
 
 static int _alt_part_test(struct part_record *part_ptr,
@@ -7016,9 +7274,17 @@ _read_data_array_from_file(int fd, char *file_name, char ***data,
 		xrealloc(buffer, pos);
 	}
 
+	/* Allocate extra space for jobpack specific environment variables */
+	if (job_ptr->jobpack_envc) {
+		for (j = 0; j < job_ptr->jobpack_envc; j++)
+			pos += (strlen(job_ptr->jobpack_env[j]) + 1);
+		xrealloc(buffer, pos);
+	}
+
 	/* We have all the data, now let's compute the pointers */
 	array_ptr = xmalloc(sizeof(char *) *
-			    (rec_cnt + job_ptr->details->env_cnt));
+			    (rec_cnt + job_ptr->details->env_cnt +
+			     job_ptr->jobpack_envc));
 	for (i = 0, pos = 0; i < rec_cnt; i++) {
 		array_ptr[i] = &buffer[pos];
 		pos += strlen(&buffer[pos]) + 1;
@@ -7060,6 +7326,43 @@ _read_data_array_from_file(int fd, char *file_name, char ***data,
 			if (i >= rec_cnt) {	/* add env to array end */
 				memcpy(&buffer[pos],
 				       job_ptr->details->env_sup[j], env_len);
+				array_ptr[rec_cnt++] = &buffer[pos];
+				pos += env_len;
+			}
+		}
+	}
+
+	/* Add jobpack specific environment variables */
+	if (job_ptr->jobpack_envc) {
+		char *tmp_chr;
+		int env_len, name_len;
+		for (j = 0; j < job_ptr->jobpack_envc; j++) {
+			tmp_chr = strchr(job_ptr->jobpack_env[j], '=');
+			if (tmp_chr == NULL) {
+				error("Invalid jobpack environment "
+				      "variable: %s",
+				      job_ptr->jobpack_env[j]);
+				continue;
+			}
+			env_len  = strlen(job_ptr->jobpack_env[j]) + 1;
+			name_len = tmp_chr - job_ptr->jobpack_env[j] + 1;
+			/* search for duplicate */
+			for (i = 0; i < rec_cnt; i++) {
+				if (xstrncmp(array_ptr[i],
+					     job_ptr->jobpack_env[j],
+					     name_len)) {
+					continue;
+				}
+				/* over-write duplicate */
+				memcpy(&buffer[pos],
+				       job_ptr->jobpack_env[j], env_len);
+				array_ptr[i] = &buffer[pos];
+				pos += env_len;
+				break;
+			}
+			if (i >= rec_cnt) {	/* add env to array end */
+				memcpy(&buffer[pos],
+				       job_ptr->jobpack_env[j], env_len);
 				array_ptr[rec_cnt++] = &buffer[pos];
 				pos += env_len;
 			}
@@ -7310,6 +7613,7 @@ _copy_job_desc_to_job_record(job_desc_msg_t * job_desc,
 	job_ptr->resp_host = xstrdup(job_desc->resp_host);
 	job_ptr->alloc_resp_port = job_desc->alloc_resp_port;
 	job_ptr->other_port = job_desc->other_port;
+	job_ptr->pack_leader = job_desc->pack_leader;
 	job_ptr->power_flags = job_desc->power_flags;
 	job_ptr->time_last_active = time(NULL);
 	job_ptr->cr_enabled = 0;
@@ -7321,10 +7625,19 @@ _copy_job_desc_to_job_record(job_desc_msg_t * job_desc,
 	job_ptr->bit_flags = job_desc->bitflags;
 	job_ptr->bit_flags &= ~BACKFILL_TEST;
 	job_ptr->ckpt_interval = job_desc->ckpt_interval;
+	job_ptr->resv_port_flag = false;
+	if (job_desc->resv_port)
+	        job_ptr->resv_port_flag = true;
 	job_ptr->spank_job_env = job_desc->spank_job_env;
 	job_ptr->spank_job_env_size = job_desc->spank_job_env_size;
 	job_desc->spank_job_env = (char **) NULL; /* nothing left to free */
 	job_desc->spank_job_env_size = 0;         /* nothing left to free */
+
+	job_ptr->pelog_env = job_desc->pelog_env;
+	job_ptr->pelog_env_size = job_desc->pelog_env_size;
+	job_desc->pelog_env = (char **) NULL; /* nothing left to free */
+	job_desc->pelog_env_size = 0;         /* nothing left to free */
+
 	job_ptr->mcs_label = xstrdup(job_desc->mcs_label);
 
 	if (job_desc->wait_all_nodes == (uint16_t) NO_VAL)
@@ -7334,6 +7647,8 @@ _copy_job_desc_to_job_record(job_desc_msg_t * job_desc,
 	job_ptr->warn_flags  = job_desc->warn_flags;
 	job_ptr->warn_signal = job_desc->warn_signal;
 	job_ptr->warn_time   = job_desc->warn_time;
+	job_ptr->group_number = job_desc->group_number;
+	job_ptr->numpack = job_desc->numpack;
 
 	detail_ptr = job_ptr->details;
 	detail_ptr->argc = job_desc->argc;
@@ -7438,8 +7753,10 @@ _copy_job_desc_to_job_record(job_desc_msg_t * job_desc,
 		detail_ptr->std_out = xstrdup(job_desc->std_out);
 	if (job_desc->work_dir)
 		detail_ptr->work_dir = xstrdup(job_desc->work_dir);
+
 	if (job_desc->begin_time > time(NULL))
 		detail_ptr->begin_time = job_desc->begin_time;
+
 	job_ptr->select_jobinfo =
 		select_g_select_jobinfo_copy(job_desc->select_jobinfo);
 	select_g_select_jobinfo_set(job_ptr->select_jobinfo,
@@ -7649,7 +7966,10 @@ extern void job_validate_mem(struct job_record *job_ptr)
 void job_time_limit(void)
 {
 	ListIterator job_iterator;
+	ListIterator dep_iter;
+	struct depend_spec *dep_ptr;
 	struct job_record *job_ptr;
+	struct job_record *dep_job;
 	time_t now = time(NULL);
 	time_t old = now - ((slurmctld_conf.inactive_limit * 4 / 3) +
 			    slurmctld_conf.msg_timeout + 1);
@@ -7809,6 +8129,29 @@ void job_time_limit(void)
 				_job_timed_out(job_ptr);
 				job_ptr->state_reason = FAIL_TIMEOUT;
 				xfree(job_ptr->state_desc);
+				if ((job_ptr->details == NULL) ||
+				    (job_ptr->details->depend_list == NULL))
+					continue;
+				dep_iter = list_iterator_create(
+						job_ptr->details->depend_list);
+				while ((dep_ptr = list_next(dep_iter))) {
+					if (dep_ptr->depend_type
+						!= SLURM_DEPEND_PACKLEADER) {
+						continue;
+					}
+					if (slurm_get_debug_flags() &
+							DEBUG_FLAG_JOB_PACK) {
+						info("JPCK: killing pack member"
+						     "=%d (leader time "
+						     "exhausted",
+						     dep_ptr->job_id);
+					}
+					dep_job = dep_ptr->job_ptr;
+					if (dep_job == NULL)
+						continue;
+					_job_timed_out(dep_job);
+				}
+				list_iterator_destroy(dep_iter);
 				continue;
 			}
 		}
@@ -8311,6 +8654,9 @@ static void _list_delete_job(void *job_entry)
 	for (i = 0; i < job_ptr->spank_job_env_size; i++)
 		xfree(job_ptr->spank_job_env[i]);
 	xfree(job_ptr->spank_job_env);
+	for (i = 0; i < job_ptr->pelog_env_size; i++)
+		xfree(job_ptr->pelog_env[i]);
+	xfree(job_ptr->pelog_env);
 	xfree(job_ptr->state_desc);
 	xfree(job_ptr->tres_alloc_cnt);
 	xfree(job_ptr->tres_alloc_str);
@@ -8321,6 +8667,9 @@ static void _list_delete_job(void *job_entry)
 	step_list_purge(job_ptr);
 	select_g_select_jobinfo_free(job_ptr->select_jobinfo);
 	xfree(job_ptr->wckey);
+	xfree(job_ptr->resv_port_array);
+	xfree(job_ptr->resv_ports);
+
 	if (job_array_size > job_count) {
 		error("job_count underflow");
 		job_count = 0;
@@ -9389,7 +9738,6 @@ static void _pack_default_job_details(struct job_record *job_ptr,
 		if (detail_ptr) {
 			packstr(detail_ptr->features,   buffer);
 			packstr(detail_ptr->work_dir,   buffer);
-
 			if (job_ptr->state_reason == WAIT_DEP_INVALID)
 				packstr(detail_ptr->orig_dependency, buffer);
 			else
@@ -9656,7 +10004,7 @@ void purge_old_job(void)
 			if (job_ptr->bit_flags & KILL_INV_DEP) {
 				_kill_dependent(job_ptr);
 			} else if (job_ptr->bit_flags & NO_KILL_INV_DEP) {
-				debug("%s: %s job dependency never satisfied",
+				debug("%s: %s job dependency condition never satisfied",
 				      __func__,
 				      jobid2str(job_ptr, jbuf, sizeof(jbuf)));
 				job_ptr->state_reason = WAIT_DEP_INVALID;
@@ -9664,7 +10012,7 @@ void purge_old_job(void)
 			} else if (kill_invalid_dep) {
 				_kill_dependent(job_ptr);
 			} else {
-				debug("%s: %s job dependency never satisfied",
+				debug("%s: %s job dependency condition never satisfied",
 				      __func__,
 				      jobid2str(job_ptr, jbuf, sizeof(jbuf)));
 				job_ptr->state_reason = WAIT_DEP_INVALID;
@@ -12418,6 +12766,9 @@ static void _send_job_kill(struct job_record *job_ptr)
 	kill_job->spank_job_env = xduparray(job_ptr->spank_job_env_size,
 					    job_ptr->spank_job_env);
 	kill_job->spank_job_env_size = job_ptr->spank_job_env_size;
+	kill_job->pelog_env = xduparray(job_ptr->pelog_env_size,
+					    job_ptr->pelog_env);
+	kill_job->pelog_env_size = job_ptr->pelog_env_size;
 
 #ifdef HAVE_FRONT_END
 	if (job_ptr->batch_host &&
@@ -12830,6 +13181,9 @@ abort_job_on_node(uint32_t job_id, struct job_record *job_ptr, char *node_name)
 		kill_req->spank_job_env = xduparray(job_ptr->spank_job_env_size,
 						    job_ptr->spank_job_env);
 		kill_req->spank_job_env_size = job_ptr->spank_job_env_size;
+		kill_req->pelog_env = xduparray(job_ptr->pelog_env_size,
+						    job_ptr->pelog_env);
+		kill_req->pelog_env_size = job_ptr->pelog_env_size;
 	} else {
 		/* kill_req->start_time = 0;  Default value */
 	}
@@ -12883,6 +13237,9 @@ kill_job_on_node(uint32_t job_id, struct job_record *job_ptr,
 	kill_req->spank_job_env = xduparray(job_ptr->spank_job_env_size,
 					    job_ptr->spank_job_env);
 	kill_req->spank_job_env_size = job_ptr->spank_job_env_size;
+	kill_req->pelog_env = xduparray(job_ptr->pelog_env_size,
+					    job_ptr->pelog_env);
+	kill_req->pelog_env_size = job_ptr->pelog_env_size;
 
 	agent_info = xmalloc(sizeof(agent_arg_t));
 	agent_info->node_count	= 1;
@@ -15492,6 +15849,7 @@ _copy_job_record_to_job_desc(struct job_record *job_ptr)
 	job_desc->num_tasks         = details->num_tasks;
 	job_desc->open_mode         = details->open_mode;
 	job_desc->other_port        = job_ptr->other_port;
+	job_desc->pack_leader       = job_ptr->pack_leader;
 	job_desc->power_flags       = job_ptr->power_flags;
 	job_desc->overcommit        = details->overcommit;
 	job_desc->partition         = xstrdup(job_ptr->partition);
@@ -15522,6 +15880,11 @@ _copy_job_record_to_job_desc(struct job_record *job_ptr)
 					       job_desc->spank_job_env_size);
 	for (i = 0; i < job_desc->spank_job_env_size; i ++)
 		job_desc->spank_job_env[i]= xstrdup(job_ptr->spank_job_env[i]);
+	job_desc->pelog_env_size = job_ptr->pelog_env_size;
+	job_desc->pelog_env      = xmalloc(sizeof(char *) *
+					       job_desc->pelog_env_size);
+	for (i = 0; i < job_desc->pelog_env_size; i ++)
+		job_desc->pelog_env[i]= xstrdup(job_ptr->pelog_env[i]);
 	job_desc->std_err           = xstrdup(details->std_err);
 	job_desc->std_in            = xstrdup(details->std_in);
 	job_desc->std_out           = xstrdup(details->std_out);
@@ -16157,6 +16520,7 @@ _kill_dependent(struct job_record *job_ptr)
 	srun_allocate_abort(job_ptr);
 }
 
+
 static void _free_job_fed_details(job_fed_details_t **fed_details_pptr)
 {
 	job_fed_details_t *fed_details_ptr = *fed_details_pptr;
@@ -16189,4 +16553,74 @@ extern void set_job_fed_details(struct job_record *job_ptr,
 	job_ptr->fed_details->origin_str =
 		fed_mgr_get_cluster_name(
 				fed_mgr_get_cluster_id(job_ptr->job_id));
+}
+/*
+ * Create a node list containing all the nodes allocated to all the members
+ * of a job pack. (Also works for legacy jobs).
+ *
+ * Parameters
+ * 	job_id	- uint32_t, job id of pack leader.
+ * 		  If that job is not a pack leader, the nodelist of the
+ * 		  nodes allocated to that single job description is returned.
+ * 	nodelist - char** xmalloc'd string, in hostlist form of all nodes
+ * 		  in all job descriptions in job.
+ * 		  Callers responsibility to xfree().
+ *
+ * Returns - number of nodes in the nodelist.
+ *
+ */
+uint32_t get_pack_nodelist(uint32_t job_id,  char **nodelist)
+{
+	List pack_depend;
+	ListIterator depend_iter;
+	struct depend_spec *ldr_dep_ptr;
+	struct job_record *job_ptr;
+	bitstr_t *job_node_bitmap = NULL;
+	uint32_t node_count;
+
+	if (nodelist == NULL) {
+		fatal("get_pack_nodelist -- nodelist is NULL");
+		return SLURM_ERROR;
+	}
+
+	job_ptr = find_job_record(job_id);
+	if (job_ptr == NULL) {
+		/* Shouldn't happen but we don't want to bring the controller
+		 * down */
+		error("failed to find job_record for job_id=%d", job_id);
+		return 0;
+	}
+	/* Alway start with bit map of originator */
+	job_node_bitmap = bit_copy(job_ptr->node_bitmap);
+	if (job_ptr->details == NULL)
+		goto legacy;
+	pack_depend = job_ptr->details->depend_list;
+	if (pack_depend == NULL)
+		goto legacy;
+	/* Iterate through dependencies, if any SLURM_DEPEND_PACKLEADER types,
+	 * then we are a leader, and or in their allocations */
+	depend_iter = list_iterator_create(pack_depend);
+	while ((ldr_dep_ptr = (struct depend_spec *) list_next(depend_iter))) {
+		if (ldr_dep_ptr->depend_type != SLURM_DEPEND_PACKLEADER)
+			continue;
+		/* We are the packleader. If we've gotten here,
+		 * the members have already been allocated.
+		 */
+		if (ldr_dep_ptr->job_ptr->node_bitmap == NULL) {
+			error("JPCK: member=%d for leader=%d has no bitmap",
+					ldr_dep_ptr->job_id, job_id);
+			continue;
+		}
+		bit_or(job_node_bitmap, ldr_dep_ptr->job_ptr->node_bitmap);
+	}
+	list_iterator_destroy(depend_iter);
+/*
+ * Not a pack leader, simply return the nodelist of the nodes in the
+ * jobs bitmap.
+ */
+legacy:
+	*nodelist = bitmap2node_name_sortable(job_node_bitmap, true);
+	node_count = bit_set_count(job_node_bitmap);
+	FREE_NULL_BITMAP(job_node_bitmap);
+	return node_count;
 }

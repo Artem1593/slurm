@@ -786,6 +786,16 @@ struct job_record {
 	uint32_t wait4switch; /* Maximum time to wait for minimum switches */
 	bool     best_switch; /* true=min number of switches met           */
 	time_t wait4switch_start; /* Time started waiting for switch       */
+
+        /* Reserved port data used for JobPack MPI support */
+        bool resv_port_flag;            /* notify job_scheduler */
+	int *resv_port_array;		/* reserved port indexes */
+	uint16_t resv_port_cnt;		/* count of ports reserved per node */
+	char *resv_ports;		/* ports reserved for job */
+        uint32_t group_number;          /* jobpack group number index */
+        uint32_t numpack;               /* number of jobpack jobs */
+	char ** jobpack_env;            /* jobpack specific envs */
+	uint16_t jobpack_envc;          /* count of jobpack specific envs */
 };
 
 /* Job dependency specification, used in "depend_list" within job_record */
@@ -799,6 +809,8 @@ struct job_record {
 #define SLURM_DEPEND_EXPAND		6	/* Expand running job */
 #define SLURM_DEPEND_AFTER_CORRESPOND	7	/* After corresponding job array
 						 * elements completes */
+#define SLURM_DEPEND_PACKLEADER		8	/* ARRM Packleader */
+#define SLURM_DEPEND_PACK		9	/* ARRM Pack */
 
 #define SLURM_FLAGS_OR			1	/* OR job dependencies */
 
@@ -808,6 +820,8 @@ struct	depend_spec {
 	uint16_t	depend_flags;	/* SLURM_FLAGS_* type */
 	uint32_t	job_id;		/* SLURM job_id */
 	struct job_record *job_ptr;	/* pointer to this job */
+	uint16_t	alloc;		/* Member is allocated */
+	time_t          submit_time;    /* time pack member submitted */
 };
 
 struct 	step_record {
@@ -1708,9 +1722,11 @@ extern void make_node_alloc(struct node_record *node_ptr,
  * IN node_ptr - pointer to node marked for completion of job
  * IN job_ptr  - pointer to job that is completing
  * IN suspended - true if job was previously suspended
+ * IN pack      - true if job is a job pack member
  */
 extern void make_node_comp(struct node_record *node_ptr,
-			   struct job_record *job_ptr, bool suspended);
+			   struct job_record *job_ptr,
+			   bool suspended, bool pack);
 
 /*
  * make_node_idle - flag specified node as having finished with a job
@@ -2424,6 +2440,23 @@ waitpid_timeout(const char *, pid_t, int *, int);
  * Calcuate and populate the number of tres' for all partitions.
  */
 extern void set_partition_tres();
+
+/*
+ * Create a node list containing all the nodes allocated to all the members
+ * of a job pack. (Also works for legacy jobs).
+ *
+ * Parameters
+ * 	job_id	- uint32_t, job id of pack leader.
+ * 		  If that job is not a pack leader, the nodelist of the
+ * 		  nodes allocated to that single job description is returned.
+ * 	nodelist - char** xmalloc'd string, in hostlist form of all nodes
+ * 		  in all job descriptions in job.
+ * 		  Callers responsibility to xfree().
+ *
+ * Returns - number of nodes in the nodelist.
+ *
+ */
+uint32_t get_pack_nodelist(uint32_t job_id,  char **nodelist);
 
 /*
  * Set job's siblings and make sibling strings

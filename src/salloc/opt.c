@@ -172,11 +172,16 @@
 #define LONG_OPT_MCS_LABEL       0x165
 #define LONG_OPT_DEADLINE        0x166
 #define LONG_OPT_DELAY_BOOT      0x167
+#define LONG_OPT_RESV_PORT       0x168
 
 /*---- global variables, defined in opt.h ----*/
 opt_t opt;
 int error_exit = 1;
 int immediate_exit = 1;
+
+extern bool packjob;
+extern bool packleader;
+extern uint32_t pack_desc_count;
 
 /*---- forward declarations of static functions  ----*/
 
@@ -204,6 +209,41 @@ static void _process_env_var(env_vars_t *e, const char *val);
 static void  _usage(void);
 
 /*---[ end forward declarations of static functions ]---------------------*/
+
+void copy_opt_struct(opt_t *to, opt_t *from)
+
+{
+	memcpy(to, from, sizeof(opt_t));
+}
+
+void copy_env(char ***to, char **from)
+
+{
+	env_array_free(*to);
+	*to = env_array_copy((const char **) from);
+}
+
+void copy_job_desc_msg(job_desc_msg_t *to, job_desc_msg_t *from)
+
+{
+	memcpy(to, from, sizeof(job_desc_msg_t));
+}
+
+void copy_alloc_struct(resource_allocation_response_msg_t *to,
+		       resource_allocation_response_msg_t *from)
+{
+	memcpy(to, from, sizeof(resource_allocation_response_msg_t));
+}
+
+static bool _check_jobpack__opt(char *option)
+{
+	if (packjob == true) {
+		info("WARNING - option %s ignored, allowed for packleader "
+		     "only", option);
+		return false;
+	}
+	return true;
+}
 
 int initialize_and_process_args(int argc, char *argv[])
 {
@@ -384,6 +424,7 @@ static void _opt_default()
 
 	opt.nice = NO_VAL;
 	opt.priority = 0;
+	opt.resv_port_flag  = false;
 }
 
 /*---[ env var processing ]-----------------------------------------------*/
@@ -765,6 +806,7 @@ void set_options(const int argc, char **argv)
 		{"use-min-nodes", no_argument,       0, LONG_OPT_USE_MIN_NODES},
 		{"wait-all-nodes",required_argument, 0, LONG_OPT_WAIT_ALL_NODES},
 		{"wckey",         required_argument, 0, LONG_OPT_WCKEY},
+		{"resv-port",     no_argument, 0, LONG_OPT_RESV_PORT},
 		{NULL,            0,                 0, 0}
 	};
 	char *opt_string =
@@ -820,7 +862,18 @@ void set_options(const int argc, char **argv)
 			break;
 		case 'd':
 			xfree(opt.dependency);
-			opt.dependency = xstrdup(optarg);
+			if ((packjob == true) &&
+			    (strcmp(optarg, "pack") == 0)) {
+				opt.dependency = xstrdup(optarg);
+				break;
+			}
+			if (_check_jobpack__opt("-d")) {
+				opt.dependency = xstrdup(optarg);
+			}
+			else {
+				if (packjob == true)
+					opt.dependency = xstrdup("pack");
+			}
 			break;
 		case 'D':
 			xfree(opt.cwd);
@@ -849,13 +902,17 @@ void set_options(const int argc, char **argv)
 			_help();
 			exit(0);
 		case 'H':
-			opt.hold = true;
+			if (_check_jobpack__opt("-H"))
+				opt.hold = true;
 			break;
 		case 'I':
-			if (optarg)
-				opt.immediate = parse_int("immediate", optarg, true);
-			else
-				opt.immediate = DEFAULT_IMMEDIATE;
+			if (_check_jobpack__opt("-I")) {
+				if (optarg)
+					opt.immediate = parse_int("immediate",
+								  optarg, true);
+				else
+					opt.immediate = DEFAULT_IMMEDIATE;
+			}
 			break;
 		case 'J':
 			xfree(opt.job_name);
@@ -915,7 +972,18 @@ void set_options(const int argc, char **argv)
 		case 'P':
 			verbose("-P option is deprecated, use -d instead");
 			xfree(opt.dependency);
-			opt.dependency = xstrdup(optarg);
+			if ((packjob == true) &&
+			    (strcmp(optarg, "pack") == 0)) {
+				opt.dependency = xstrdup(optarg);
+				break;
+			}
+			if (_check_jobpack__opt("-P")) {
+				opt.dependency = xstrdup(optarg);
+			}
+			else {
+				if (packjob == true)
+					opt.dependency = xstrdup("pack");
+			}
 			break;
 		case 'Q':
 			opt.quiet++;
@@ -931,7 +999,8 @@ void set_options(const int argc, char **argv)
 			break;
 		case 't':
 			xfree(opt.time_limit_str);
-			opt.time_limit_str = xstrdup(optarg);
+			if (_check_jobpack__opt("-t"))
+				opt.time_limit_str = xstrdup(optarg);
 			break;
 		case 'u':
 			_usage();
@@ -959,7 +1028,8 @@ void set_options(const int argc, char **argv)
 		case 'W':
 			verbose("wait option has been deprecated, use "
 				"immediate option");
-			opt.immediate = parse_int("wait", optarg, true);
+			if (_check_jobpack__opt("-W"))
+				opt.immediate = parse_int("wait", optarg, true);
 			break;
 		case 'x':
 			xfree(opt.exc_nodes);
@@ -1085,11 +1155,13 @@ void set_options(const int argc, char **argv)
 			verify_conn_type(optarg, opt.conn_type);
 			break;
 		case LONG_OPT_BEGIN:
-			opt.begin = parse_time(optarg, 0);
-			if (opt.begin == 0) {
-				error("Invalid time specification %s",
-				      optarg);
-				exit(error_exit);
+			if (_check_jobpack__opt("--begin")) {
+				opt.begin = parse_time(optarg, 0);
+				if (opt.begin == 0) {
+					error("Invalid time specification %s",
+					      optarg);
+					exit(error_exit);
+				}
 			}
 			break;
 		case LONG_OPT_MAIL_TYPE:
@@ -1138,6 +1210,9 @@ void set_options(const int argc, char **argv)
 				opt.priority = NO_VAL - 1;
 			} else {
 				priority = strtoll(optarg, NULL, 10);
+			if (_check_jobpack__opt("--priority")) {
+				priority = strtoll(optarg, NULL, 10);
+			}
 				if (priority < 0) {
 					error("Priority must be >= 0");
 					exit(error_exit);
@@ -1156,6 +1231,11 @@ void set_options(const int argc, char **argv)
 			opt.bell = BELL_NEVER;
 			break;
 		case LONG_OPT_JOBID:
+			if ((packleader == true) || (packjob == true)) {
+				info ("WARNING - option --jobid ignored, "
+				      "not allowed for packleader or packjob");
+				break;
+			}
 			opt.jobid = parse_int("jobid", optarg, true);
 			break;
 		case LONG_OPT_PROFILE:
@@ -1293,7 +1373,8 @@ void set_options(const int argc, char **argv)
 			break;
 		case LONG_OPT_TIME_MIN:
 			xfree(opt.time_min_str);
-			opt.time_min_str = xstrdup(optarg);
+			if (_check_jobpack__opt("--time-min"))
+				opt.time_min_str = xstrdup(optarg);
 			break;
 		case LONG_OPT_GRES:
 			if (!xstrcasecmp(optarg, "help") ||
@@ -1354,6 +1435,13 @@ void set_options(const int argc, char **argv)
 			break;
 		case LONG_OPT_SPREAD_JOB:
 			opt.job_flags |= SPREAD_JOB;
+
+		case LONG_OPT_RESV_PORT:
+			if (pack_desc_count < 2)
+				info("WARNING - option --resv-port ignored, "
+				     "allowed for Job-Packs only");
+			else
+				opt.resv_port_flag = true;
 			break;
 		case LONG_OPT_USE_MIN_NODES:
 			opt.job_flags |= USE_MIN_NODES;
@@ -2097,8 +2185,9 @@ static void _opt_list(void)
 
 static void _usage(void)
 {
- 	printf(
-"Usage: salloc [-N numnodes|[min nodes]-[max nodes]] [-n num-processors]\n"
+	printf(
+"Usage: salloc job_description(0) [ : job_description(1)] [...] [ : job_description(n)] \n"
+"              Where job_descriptions is \n"
 "              [[-c cpus-per-node] [-r n] [-p partition] [--hold] [-t minutes]\n"
 "              [--immediate[=secs]] [--no-kill] [--overcommit] [-D path]\n"
 "              [--oversubscribe] [-J jobname] [--jobid=id]\n"
@@ -2128,8 +2217,9 @@ static void _help(void)
 {
 	slurm_ctl_conf_t *conf;
 
-        printf (
-"Usage: salloc [OPTIONS...] [executable [args...]]\n"
+	printf (
+"Usage: salloc job_description(0) [ : job_description(1)] [...] [ : job_description(n)] \n"
+"              Each job_descriptiong is [OPTIONS...] executable [args...]\n"
 "\n"
 "Parallel run options:\n"
 "  -A, --account=name          charge job to specified account\n"

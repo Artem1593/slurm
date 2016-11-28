@@ -7,6 +7,9 @@
  *  Portions copyright (C) 2015 Mellanox Technologies Inc.
  *  Written by Artem Y. Polyakov <artemp@mellanox.com>.
  *  All rights reserved.
+ *  Portions copyright (C) 2015 Atos Inc.
+ *  Written by Martin Perry <martin.perry@atos.net>.
+ *  All rights reserved.
  *
  *  This file is part of SLURM, a resource management program.
  *  For details, see <http://slurm.schedmd.com/>.
@@ -43,6 +46,7 @@
 #endif
 
 #include <dlfcn.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -51,11 +55,15 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "src/common/slurm_xlator.h"
 #include "src/common/net.h"
 #include "src/common/proc_args.h"
 #include "src/common/slurm_mpi.h"
+#include "src/common/srun_globals.h"
 #include "src/common/xstring.h"
 #include "src/slurmd/slurmstepd/slurmstepd_job.h"
 #include "src/slurmd/common/reverse_tree_math.h"
@@ -68,7 +76,7 @@
 #include "ring.h"
 
 #define PMI2_SOCK_ADDR_FMT "%s/sock.pmi2.%u.%u"
-
+#define VECT_MAX_SIZE 128
 
 extern char **environ;
 
@@ -79,6 +87,80 @@ int *task_socks;
 char tree_sock_addr[128];
 pmi2_job_info_t job_info;
 pmi2_tree_info_t tree_info;
+
+/* In string <s>, replace substring <old> with substring <new> */
+void _replace(char *s, char *old, char *new)
+{
+	char *p, *p1;
+	size_t newlen = strlen(new);
+	size_t oldlen = strlen(old);
+	char buf[VECT_MAX_SIZE];
+
+	p = strstr(s, old); 	// p  = ptr to first char in old substring
+	p1 = p + oldlen;	// p1 = ptr to first char after old substring
+	strcpy(buf, p1);	// copy rest of orig string to buffer
+	strncpy(s, new, newlen);// insert new substring into orig string
+	strcpy(buf, s + newlen);// copy rest of orig string back
+}
+
+/* Update node indexes in vectors to reflect current node index
+ *
+ * vecstr - original vector list
+ * newvecstr - updated vector list
+ * curnodeidx - current node index
+ */
+void _adjust_vect_nodeidx(char *vecstr, char *newvecstr, int curnodeidx)
+{
+	char *sub, *sub1;
+	char *numstr = xmalloc(50 * sizeof(char));
+	char *newnumstr = xmalloc(50 * sizeof(char));
+	int num;
+
+	strcpy(newvecstr, vecstr);
+	sub = newvecstr;
+	numstr[0]='\0';
+	while ((sub = strstr(sub, ",(")) != NULL) {
+		sub+=2;
+		sub1=sub;
+		while(1) {
+			if (isdigit(*sub)) {
+				xstrcatchar(numstr, *sub);
+				sub++;
+			} else
+				break;
+		}
+		sub=sub1;
+		xstrcatchar(numstr, '\0');
+		num = atoi(numstr);
+		num+=curnodeidx;
+		sprintf(newnumstr, "%d", num);
+		_replace(sub, numstr, newnumstr);
+		numstr[0]= '\0';
+	}
+	xfree(numstr);
+	xfree(newnumstr);
+}
+
+/* Combine vector lists
+ *
+ * vect_list1 - first vector list
+ * vect_list2 - second vector list
+ *
+ * OUT: combined vector list returned in vect_list1
+ */
+void _combine_vect_lists(char *vect_list1, char *vect_list2)
+{
+	char *p, *p1;
+
+	if (strlen(vect_list1)+strlen(vect_list2) > VECT_MAX_SIZE) {
+		error("mpi/pmi2: vector list too long");
+	}
+	p = strstr(vect_list2, "(vector");
+	p+=7;
+	p1 = strstr(vect_list1, "))");
+	p1[1]='\0';
+	strcat(p1, p);
+}
 
 extern bool
 in_stepd(void)
@@ -99,19 +181,17 @@ _setup_stepd_job_info(const stepd_step_rec_t *job, char ***env)
 	int i;
 
 	memset(&job_info, 0, sizeof(job_info));
-
-	job_info.jobid  = job->jobid;
-	job_info.stepid = job->stepid;
-	job_info.nnodes = job->nnodes;
-	job_info.nodeid = job->nodeid;
-	job_info.ntasks = job->ntasks;
+	job_info.jobid  = job->mpi_jobid;
+	job_info.stepid = job->mpi_stepid;
+	job_info.nodeid = job->mpi_stepfnodeid;
+	job_info.ntasks = job->mpi_ntasks;
+	job_info.nnodes = job->mpi_nnodes;
 	job_info.ltasks = job->node_tasks;
 	job_info.gtids = xmalloc(job->node_tasks * sizeof(uint32_t));
-	for (i = 0; i < job->node_tasks; i ++) {
-		job_info.gtids[i] = job->task[i]->gtid;
+	for (i = 0; i < job->node_tasks; i++) {
+		job_info.gtids[i] = job->task[i]->utaskid;
 	}
 	job_info.switch_job = (void*)job->switch_job;
-
 	p = getenvp(*env, PMI2_PMI_DEBUGGED_ENV);
 	if (p) {
 		job_info.pmi_debugged = atoi(p);
@@ -129,13 +209,20 @@ _setup_stepd_job_info(const stepd_step_rec_t *job, char ***env)
 		job_info.spawn_seq = 0;
 		job_info.spawner_jobid = NULL;
 	}
+	p = getenvp(*env, PMI2_PMI_STEPID_ENV);
+	if (p) {
+		job_info.pmi_stepid = xstrdup(p);
+		unsetenvp(*env, PMI2_PMI_STEPID_ENV);
+	} else {
+		xstrfmtcat(job_info.pmi_stepid, "%u", job->mpi_stepid);
+	}
 	p = getenvp(*env, PMI2_PMI_JOBID_ENV);
 	if (p) {
 		job_info.pmi_jobid = xstrdup(p);
 		unsetenvp(*env, PMI2_PMI_JOBID_ENV);
 	} else {
-		xstrfmtcat(job_info.pmi_jobid, "%u.%u", job->jobid,
-			   job->stepid);
+		xstrfmtcat(job_info.pmi_jobid, "%u.%u", job->mpi_jobid,
+			   job->mpi_stepid);
 	}
 	p = getenvp(*env, PMI2_STEP_NODES_ENV);
 	if (!p) {
@@ -145,6 +232,33 @@ _setup_stepd_job_info(const stepd_step_rec_t *job, char ***env)
 		job_info.step_nodelist = xstrdup(p);
 		unsetenvp(*env, PMI2_STEP_NODES_ENV);
 	}
+	p = getenvp(*env, PMI2_SRUN_STEP_INDEX_ENV);
+	if (!p) {
+		error("mpi/pmi2: unable to find nodelist step indexes in job environment");
+		return SLURM_ERROR;
+	} else {
+		job_info.srun_step_index_list = xstrdup(p);
+		unsetenvp(*env, PMI2_SRUN_STEP_INDEX_ENV);
+	}
+
+	job_info.srun_step_index_arr =
+			xmalloc((job_info.nnodes*2) * sizeof(int));
+	p = job_info.srun_step_index_list;
+	if (*p != 'n') {
+		for (i=0; i < job_info.nnodes; i++) {
+			sscanf(p, "%d", &job_info.srun_step_index_arr[i]);
+			p = strchr(p, ',')+1;
+		}
+	}
+	hostlist_t hl = hostlist_create(job_info.step_nodelist);
+	for (i=0; i<job->mpi_stepfnodeid; i++) {
+		hostlist_delete_nth(hl, 0);
+	}
+	p = hostlist_ranged_string_xmalloc(hl);
+	job_info.nodeid = nodelist_find(p, job->node_name)
+			+ job->mpi_stepfnodeid;
+	xfree(p);
+
 	/*
 	 * how to get the mapping info from stepd directly?
 	 * there is the task distribution info in the launch_tasks_request_msg_t,
@@ -180,7 +294,7 @@ static int
 _setup_stepd_tree_info(const stepd_step_rec_t *job, char ***env)
 {
 	hostlist_t hl;
-	char *srun_host;
+	char srun_host[64];
 	uint16_t port;
 	char *p;
 	int tree_width;
@@ -206,7 +320,6 @@ _setup_stepd_tree_info(const stepd_step_rec_t *job, char ***env)
 	} else {
 		tree_width = slurm_get_tree_width();
 	}
-
 	/* TODO: cannot launch 0 tasks on node */
 
 	/*
@@ -229,22 +342,23 @@ _setup_stepd_tree_info(const stepd_step_rec_t *job, char ***env)
 
 	tree_info.pmi_port = 0;	/* not used */
 
-	srun_host = getenvp(*env, "SLURM_SRUN_COMM_HOST");
-	if (!srun_host) {
+	p = getenvp(*env, "SLURM_SRUN_COMM_HOST");
+	if (!p) {
 		error("mpi/pmi2: unable to find srun comm ifhn in env");
 		return SLURM_ERROR;
+	} else {
+		strncpy(srun_host, p, 64);
 	}
 	p = getenvp(*env, PMI2_SRUN_PORT_ENV);
 	if (!p) {
 		error("mpi/pmi2: unable to find srun pmi2 port in env");
 		return SLURM_ERROR;
+	} else {
+		port = atoi(p);
+		unsetenvp(*env, PMI2_SRUN_PORT_ENV);
 	}
-	port = atoi(p);
-
 	tree_info.srun_addr = xmalloc(sizeof(slurm_addr_t));
 	slurm_set_addr(tree_info.srun_addr, port, srun_host);
-
-	unsetenvp(*env, PMI2_SRUN_PORT_ENV);
 
 	/* init kvs seq to 0. TODO: reduce array size */
 	tree_info.children_kvs_seq = xmalloc(sizeof(uint32_t) *
@@ -262,6 +376,7 @@ _setup_stepd_sockets(const stepd_step_rec_t *job, char ***env)
 	struct sockaddr_un sa;
 	int i;
 	char *spool;
+	int step_index;
 
 	debug("mpi/pmi2: setup sockets");
 
@@ -273,8 +388,9 @@ _setup_stepd_sockets(const stepd_step_rec_t *job, char ***env)
 	sa.sun_family = PF_UNIX;
 
 	spool = slurm_get_slurmd_spooldir();
-	snprintf(sa.sun_path, sizeof(sa.sun_path), PMI2_SOCK_ADDR_FMT,
-		 spool, job->jobid, job->stepid);
+	step_index = job_info.srun_step_index_arr[job_info.nodeid];
+	snprintf(sa.sun_path, sizeof(sa.sun_path), PMI2_SOCK_ADDR_FMT, spool,
+				job->mpi_jobid, step_index);
 	unlink(sa.sun_path);    /* remove possible old socket */
 	xfree(spool);
 
@@ -298,6 +414,7 @@ _setup_stepd_sockets(const stepd_step_rec_t *job, char ***env)
 		/* this must be delayed after the tasks have been forked */
 /* 		close(TASK_PMI_SOCK(i)); */
 	}
+
 	return SLURM_SUCCESS;
 }
 
@@ -307,7 +424,6 @@ _setup_stepd_kvs(const stepd_step_rec_t *job, char ***env)
 	int rc = SLURM_SUCCESS, i = 0, pp_cnt = 0;
 	char *p, env_key[32], *ppkey, *ppval;
 
-	kvs_seq = 1;
 	rc = temp_kvs_init();
 	if (rc != SLURM_SUCCESS)
 		return rc;
@@ -393,9 +509,9 @@ pmi2_cleanup_stepd()
 static char *
 _get_proc_mapping(const mpi_plugin_client_info_t *job)
 {
-	uint32_t node_cnt, task_cnt, task_mapped, node_task_cnt, **tids;
-	uint32_t task_dist, block;
-	uint16_t *tasks, *rounds;
+	uint32_t node_cnt, task_cnt, task_mapped, node_task_cnt, **tids,
+		block;
+	uint16_t task_dist, *tasks, *rounds;
 	int i, start_id, end_id;
 	char *mapping = NULL;
 
@@ -407,7 +523,10 @@ _get_proc_mapping(const mpi_plugin_client_info_t *job)
 
 	/* for now, PMI2 only supports vector processor mapping */
 
-	if ((task_dist & SLURM_DIST_NODEMASK) == SLURM_DIST_NODECYCLIC) {
+	if (task_dist == SLURM_DIST_CYCLIC ||
+	    task_dist == SLURM_DIST_CYCLIC_CFULL ||
+	    task_dist == SLURM_DIST_CYCLIC_CYCLIC ||
+	    task_dist == SLURM_DIST_CYCLIC_BLOCK) {
 		mapping = xstrdup("(vector");
 
 		rounds = xmalloc (node_cnt * sizeof(uint16_t));
@@ -536,7 +655,8 @@ _setup_srun_job_info(const mpi_plugin_client_info_t *job)
 	memset(&job_info, 0, sizeof(job_info));
 
 	job_info.jobid  = job->jobid;
-	job_info.stepid = job->stepid;
+	job_info.orig_jobid = job->orig_jobid;
+	job_info.stepid = packstepid;
 	job_info.nnodes = job->step_layout->node_cnt;
 	job_info.nodeid = -1;	/* id in tree. not used. */
 	job_info.ntasks = job->step_layout->task_cnt;
@@ -561,11 +681,16 @@ _setup_srun_job_info(const mpi_plugin_client_info_t *job)
 		job_info.spawn_seq = 0;
 		job_info.spawner_jobid = NULL;
 	}
-
 	job_info.step_nodelist = xstrdup(job->step_layout->node_list);
 	job_info.proc_mapping = _get_proc_mapping(job);
 	if (job_info.proc_mapping == NULL) {
 		return SLURM_ERROR;
+	}
+	p = getenv(PMI2_PMI_STEPID_ENV);
+	if (p) {		/* spawned */
+		job_info.pmi_stepid = xstrdup(p);
+	} else {
+		xstrfmtcat(job_info.pmi_stepid, "%u", job_info.stepid);
 	}
 	p = getenv(PMI2_PMI_JOBID_ENV);
 	if (p) {		/* spawned */
@@ -574,7 +699,9 @@ _setup_srun_job_info(const mpi_plugin_client_info_t *job)
 		xstrfmtcat(job_info.pmi_jobid, "%u.%u", job->jobid,
 			   job->stepid);
 	}
+
 	job_info.job_env = env_array_copy((const char **)environ);
+
 
 	/* hjcao: this is really dirty.
 	   But writing a new launcher is not desirable. */
@@ -630,7 +757,7 @@ _setup_srun_tree_info(const mpi_plugin_client_info_t *job)
 
 	spool = slurm_get_slurmd_spooldir();
 	snprintf(tree_sock_addr, 128, PMI2_SOCK_ADDR_FMT,
-		 spool, job->jobid, job->stepid);
+		 spool, job->jobid, atoi(job_info.pmi_stepid));
 	xfree(spool);
 
 	/* init kvs seq to 0. TODO: reduce array size */
@@ -643,13 +770,159 @@ _setup_srun_tree_info(const mpi_plugin_client_info_t *job)
 static int
 _setup_srun_socket(const mpi_plugin_client_info_t *job)
 {
+	int i,j;
+
 	if (net_stream_listen(&tree_sock,
 			      &tree_info.pmi_port) < 0) {
 		error("mpi/pmi2: Failed to create tree socket");
 		return SLURM_ERROR;
 	}
 	debug("mpi/pmi2: srun pmi port: %hu", tree_info.pmi_port);
+	if (!srun_mpi_combine) {
+		if (slurm_get_debug_flags() & DEBUG_FLAG_JOB_PACK)
+			debug2("JPCK: mpi/pmi2: step#%d tree_info.pmi_port = %hu",
+				srun_step_idx, tree_info.pmi_port);
+		return SLURM_SUCCESS;
+	}
 
+	/* For multi-step srun with mpi-combine=yes, use step#0 as common
+	 * PMI server */
+	if (srun_step_idx == 0) {
+		for (i=1; i < srun_num_steps; i++) {
+			j=i*2;
+			close(pmi2port_pipe[j+0]);
+			write(pmi2port_pipe[j+1], &tree_info.pmi_port,
+			      sizeof(tree_info.pmi_port));
+			close(pmi2port_pipe[j+1]);
+		}
+	} else {
+		j=srun_step_idx*2;
+		close(pmi2port_pipe[j+1]);
+		read(pmi2port_pipe[j+0], &tree_info.pmi_port,
+		     sizeof(tree_info.pmi_port));
+		close(pmi2port_pipe[j+0]);
+	}
+	if (slurm_get_debug_flags() & DEBUG_FLAG_JOB_PACK)
+		debug2("JPCK: mpi/pmi2: step#%d tree_info.pmi_port = %hu",
+			srun_step_idx, tree_info.pmi_port);
+
+	return SLURM_SUCCESS;
+}
+
+static int
+_combine_srun_job_info(const mpi_plugin_client_info_t *job)
+{
+	char adj_vect_list[VECT_MAX_SIZE];
+	char comb_vect_list[VECT_MAX_SIZE * srun_num_steps];
+	char readbuffer[VECT_MAX_SIZE];
+//	char *readbuffer = xmalloc(VECT_MAX_SIZE * sizeof(char));
+	int curnodeidx = 0;
+	int nnodes = 0;
+	int i,j,k;
+	char *p, *idx;
+
+	job_info.srun_step_index_list = xstrdup("n");
+	if (!srun_mpi_combine) {
+		srun_num_steps = 1;
+		job_info.nnodes_array = xmalloc(srun_num_steps * sizeof(int));
+		job_info.nnodes_array[0] = job_info.nnodes;
+		if (slurm_get_debug_flags() & DEBUG_FLAG_JOB_PACK) {
+			debug2("JPCK: mpi/pmi2: step#%d node list = %s",
+				srun_step_idx, job_info.step_nodelist);
+			debug2("JPCK: mpi/pmi2: step#%d vector list = %s",
+				srun_step_idx, job_info.proc_mapping);
+		}
+		return SLURM_SUCCESS;
+	}
+
+	/* For multi-step srun with mpi-combine=yes, combine process mapping
+	 * vectors to create a single MPI_COMM_WORLD communicator containing
+	 * all steps. Also create srun step index list.
+	 */
+	if (srun_step_idx == 0) {
+		/* Set combined nodelist and ntasks */
+		idx = xmalloc(10 * sizeof(char));
+		p = getenv("SLURM_NODELIST_MPI");
+		job_info.step_nodelist = xstrdup(p);
+		p = getenv("SLURM_NTASKS_MPI");
+		job_info.ntasks = atoi(p);
+		job_info.nnodes_array = xmalloc(srun_num_steps * sizeof(int));
+		job_info.nnodes_array[0] = job_info.nnodes;
+		job_info.srun_step_index_list = NULL;
+		for(k=0; k<job_info.nnodes; k++) {
+			if (k>0)
+				xstrcat(job_info.srun_step_index_list, ",");
+			sprintf(idx, "%d", 0);
+			xstrcat(job_info.srun_step_index_list, idx);
+		}
+
+		curnodeidx=job_info.nnodes;
+		/* Read and combine vector lists for all steps, and generate
+		 * srun step index list */
+		for (i=1; i < srun_num_steps; i++) {
+			j=i*2;
+			sprintf(idx, "%d", i);
+			read(vector_pipe_out[j+0], readbuffer,
+			     VECT_MAX_SIZE);
+			strcpy(comb_vect_list, job_info.proc_mapping);
+			_adjust_vect_nodeidx(readbuffer, adj_vect_list,
+					     curnodeidx);
+			_combine_vect_lists(comb_vect_list, adj_vect_list);
+			job_info.proc_mapping = xstrdup(comb_vect_list);
+			read(nnodes_pipe[j+0], &nnodes, sizeof(nnodes));
+			for(k=0; k<nnodes; k++) {
+				xstrcat(job_info.srun_step_index_list, ",");
+				xstrcat(job_info.srun_step_index_list, idx);
+			}
+			job_info.nnodes+=nnodes;
+			job_info.nnodes_array[i] = nnodes;
+			curnodeidx+=nnodes;
+			close(vector_pipe_out[j+0]);
+			close(nnodes_pipe[j+0]);
+		}
+		if (slurm_get_debug_flags() & DEBUG_FLAG_JOB_PACK) {
+			debug2("JPCK: mpi/pmi2: combined node list = %s",
+			     job_info.step_nodelist);
+			debug2("JPCK: mpi/pmi2: combined vector list = %s",
+			     job_info.proc_mapping);
+		}
+		/* Write combined vector list & step index list to srun
+		 * processes for all other steps */
+		for (i=1; i < srun_num_steps; i++) {
+			j=i*2;
+			write(vector_pipe_in[j+1], job_info.proc_mapping,
+			      strlen(job_info.proc_mapping)+1);
+			write(stepindex_pipe_in[j+1], job_info.srun_step_index_list,
+			      strlen(job_info.srun_step_index_list)+1);
+			close(vector_pipe_in[j+1]);
+			close(stepindex_pipe_in[j+1]);
+		}
+	}
+	else {
+		/* Write this step's vectors and nnodes into pipes for
+		 * combining by step#0 */
+		j = srun_step_idx*2;
+		write(vector_pipe_out[j+1], job_info.proc_mapping,
+		      strlen(job_info.proc_mapping)+1);
+		write(nnodes_pipe[j+1], &job_info.nnodes,
+		      sizeof(job_info.nnodes));
+		close(vector_pipe_out[j+1]);
+		close(nnodes_pipe[j+1]);
+		/* set combined nodelist, ntasks and nnodes */
+		p = getenv("SLURM_NODELIST_MPI");
+		job_info.step_nodelist = xstrdup(p);
+		p = getenv("SLURM_NTASKS_MPI");
+		job_info.ntasks = atoi(p);
+		p = getenv("SLURM_NNODES_MPI");
+		job_info.nnodes = atoi(p);
+		/* Read combined vectors and srun step index list from step#0*/
+		read(vector_pipe_in[j+0], readbuffer, sizeof(readbuffer));
+		job_info.proc_mapping = xstrdup(readbuffer);
+		read(stepindex_pipe_in[j+0], readbuffer, sizeof(readbuffer));
+		job_info.srun_step_index_list = xstrdup(readbuffer);
+		close(vector_pipe_in[j+0]);
+		close(stepindex_pipe_in[j+0]);
+	}
 	return SLURM_SUCCESS;
 }
 
@@ -671,6 +944,8 @@ _setup_srun_environ(const mpi_plugin_client_info_t *job, char ***env)
 				tree_info.pmi_port);
 	env_array_overwrite_fmt(env, PMI2_STEP_NODES_ENV, "%s",
 				job_info.step_nodelist);
+	env_array_overwrite_fmt(env, PMI2_SRUN_STEP_INDEX_ENV, "%s",
+				job_info.srun_step_index_list);
 	env_array_overwrite_fmt(env, PMI2_PROC_MAPPING_ENV, "%s",
 				job_info.proc_mapping);
 	return SLURM_SUCCESS;
@@ -758,6 +1033,10 @@ pmi2_setup_srun(const mpi_plugin_client_info_t *job, char ***env)
 	run_in_stepd = false;
 
 	rc = _setup_srun_job_info(job);
+	if (rc != SLURM_SUCCESS)
+		return rc;
+
+	rc = _combine_srun_job_info(job);
 	if (rc != SLURM_SUCCESS)
 		return rc;
 

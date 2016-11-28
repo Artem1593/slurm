@@ -67,6 +67,7 @@
 #include "src/common/slurm_priority.h"
 #include "src/slurmctld/job_scheduler.h"
 #include "src/slurmctld/locks.h"
+#include "src/slurmctld/preempt.h"
 #include "src/slurmctld/slurmctld.h"
 
 #define EPSILON	10*1E15
@@ -80,6 +81,9 @@
 const char  plugin_name[]   = "Preempt by Job Priority and Runtime";
 const char  plugin_type[]   = "preempt/job_prio";
 const uint32_t  plugin_version  = SLURM_VERSION_NUMBER;
+
+/* Global data */
+static uint64_t debug_flags = 0;
 
 /* The acct_usage_element data structure holds informaiton about
  * an association's current usage and current CPU count*/
@@ -718,6 +722,7 @@ extern int init( void )
 {
 	int rc = SLURM_SUCCESS;
 	char *prio_type = slurm_get_priority_type();
+	debug_flags = slurm_get_debug_flags();
 
 	if (strncasecmp(prio_type, "priority/multifactor", 20)) {
 		error("The priority plugin (%s) is currently loaded. "
@@ -805,6 +810,7 @@ extern List find_preemptable_jobs(struct job_record *job_ptr)
 	preemptee_candidate_iterator = list_iterator_create(job_list);
 	while ((preemptee_job_ptr = (struct job_record *)
 				    list_next(preemptee_candidate_iterator))) {
+
 		if (!IS_JOB_RUNNING(preemptee_job_ptr) &&
 		    !IS_JOB_SUSPENDED(preemptee_job_ptr))
 			continue;
@@ -825,6 +831,15 @@ extern List find_preemptable_jobs(struct job_record *job_ptr)
 		if (CHECK_FOR_PREEMPTOR_OVERALLOC &&
 		    !_account_preemptable(preemptor_job_ptr, preemptee_job_ptr))
 			continue;
+
+		if (preemptor_job_ptr->pack_leader != 0) {
+			if (debug_flags & DEBUG_FLAG_PRIO) {
+				info("JPCK: pack_member %d can't be preempted "
+				      "by job %d", preemptor_job_ptr->job_id,
+				      job_ptr->job_id);
+			}
+			continue; /* Members of job_pack, can't be preempted */
+		}
 
 		/* This job is a valid preemption candidate and should be added
 		 * to the list. Create the list as needed. */

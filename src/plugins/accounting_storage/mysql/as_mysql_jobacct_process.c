@@ -151,6 +151,8 @@ enum {
 /* if this changes you will need to edit the corresponding
  * enum below also t1 is step_table */
 char *step_req_inx[] = {
+	"t1.id_packjob",
+	"t1.id_packstep",
 	"t1.id_step",
 	"t1.time_start",
 	"t1.time_end",
@@ -201,6 +203,8 @@ char *step_req_inx[] = {
 };
 
 enum {
+	STEP_REQ_PACKJOBID,
+	STEP_REQ_PACKSTEPID,
 	STEP_REQ_STEPID,
 	STEP_REQ_START,
 	STEP_REQ_END,
@@ -778,7 +782,7 @@ static int _cluster_get_jobs(mysql_conn_t *mysql_conn,
 			xfree(extra);
 		}
 
-		if (debug_flags & DEBUG_FLAG_DB_STEP)
+//		if (debug_flags & DEBUG_FLAG_DB_STEP)
 			DB_DEBUG(mysql_conn->conn, "query\n%s", query);
 
 		if (!(step_result = mysql_db_query_ret(
@@ -818,6 +822,11 @@ static int _cluster_get_jobs(mysql_conn_t *mysql_conn,
 			step->nnodes = slurm_atoul(step_row[STEP_REQ_NODES]);
 
 			step->ntasks = slurm_atoul(step_row[STEP_REQ_TASKS]);
+			step->packjobid =
+				slurm_atoul(step_row[STEP_REQ_PACKJOBID]);
+			step->packstepid =
+				slurm_atoul(step_row[STEP_REQ_PACKSTEPID]);
+
 			step->task_dist =
 				slurm_atoul(step_row[STEP_REQ_TASKDIST]);
 

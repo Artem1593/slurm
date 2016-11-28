@@ -107,6 +107,7 @@ OTHER CHANGES
  -- burst_buffer/cray: Accept new jobs on backup slurmctld daemon without access
     to dw_wlm_cli command. No burst buffer actions will take place.
 
+
 API CHANGES
 ===========
 
@@ -143,9 +144,75 @@ Added slurmdb_federation_cond_t for selecting federations from db.
 Added slurmdb_federation_rec_t to represent federation objects.
 Added job_fed_details_t for storing federated job information.
 Added sib_msg_t for sending messages to siblings.
+ -- Added the following fields to struct slurm_step_launch_params_t:
+    packstepid.
+ -- Added the following fields to struct slurm_job_info_t:
+    pack_leader.
+ -- Added the following fields to struct kill_job_msg_t:
+    pelog_env, pelog_env_size.
+ -- Added the following fields to struct job_desc_msg_t:
+    pelog_env, pelog_env_size, group_number, numpack, resv_port.
+ -- Added the following fields to struct launch_tasks_request_msg_t:
+    pelog_env, pelog_env_size.
+ -- Added the following fields to struct prolog_launch_msg_t:
+    pelog_env, pelog_env_size.
+ -- Added the following fields to struct job_desc_msg_t:
+    pack_leader.
+ -- Added the following fields to struct slurmdb_job_rec_t:
+    packid.
+ -- Added the following fields to struct slurmdb_step_rec_t:
+    packstepid.
+ -- Added the following fields to struct dbd_job_start_msg_t:
+    pack_leader.
+ -- Added the following fields to struct dbd_step_comp_msg_t:
+    packstepid.
+ -- Added the following fields to struct dbd_step_start_msg_t:
+    packstepid.
+ -- Added the following fields to struct _job_table_fields:
+    packid.
+ -- Added the following fields to struct step_table_fields:
+    packjobid, packstepid.
+ -- Added the following fields to struct job_step_create_request_msg_t:
+    packstepid.
+ -- Added the following fields to struct launch_tasks_request_msg_t:
+    packstepid.
+ -- Added the following fields to struct srun_options:
+    packstepid.
+ -- Added the following fields to struct job_record:
+    pack_leader.
+ -- Added the following fields to struct stepd_step_rec_t:
+    packstepid.
+
+Added the following struct definitions
+======================================
+ -- Added pack_job_env_t: jobpack environment structure.
+ -- Added pack_group_struct_t: jobpack group environment structure.
 
 Removed members from the following struct definitions
 =====================================================
+
+Changed the following enums and #defines
+========================================
+ -- Added SLURM_DEPEND_PACKLEADER: ARRM Packleader.
+ -- Added SLURM_DEPEND_PACK:ARRM Pack.
+
+Added the following API's
+=========================
+
+Changed the following API's
+============================
+
+DBD API Changes
+===============
+
+Changed members of the following structs
+========================================
+
+Added the following struct definitions
+======================================
+
+Added members to the following struct definitions
+=================================================
 
 Changed the following enums and #defines
 ========================================

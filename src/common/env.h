@@ -99,6 +99,8 @@ void	unsetenvp(char **env, const char *name);
 
 int	setup_env(env_t *env, bool preserve_env);
 
+char *	env_jobpack(const char *envname, uint32_t group_number);
+
 /**********************************************************************
  * Newer environment variable handling scheme
  **********************************************************************/
@@ -183,6 +185,12 @@ env_array_for_step(char ***dest,
 		   const job_step_create_response_msg_t *step,
 		   uint16_t launcher_port,
 		   bool preserve_env);
+
+void
+env_array_for_step_jobpack(char ***dest,
+		   const job_step_create_response_msg_t *step,
+		   uint16_t launcher_port,
+		   bool preserve_env, uint32_t group_number);
 
 /*
  * Return an empty environment variable array (contains a single
@@ -279,7 +287,7 @@ int env_array_overwrite_fmt(char ***array_ptr, const char *name,
  * Set in the running process's environment all of the environment
  * variables in a supplied environment variable array.
  */
-void env_array_set_environment(char **env_array);
+void env_array_set_environment(char **env_array, uint32_t group_number);
 
 /*
  * load environment from specified file name.

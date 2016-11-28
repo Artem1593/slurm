@@ -73,6 +73,7 @@
 #include "src/common/slurm_protocol_api.h"
 #include "src/common/slurm_protocol_defs.h"
 #include "src/common/slurm_time.h"
+#include "src/common/srun_globals.h"
 #include "src/common/uid.h"
 #include "src/common/xmalloc.h"
 #include "src/common/xstring.h"
@@ -233,6 +234,7 @@ int slurm_step_launch (slurm_step_ctx_t *ctx,
 
 	/* Start tasks on compute nodes */
 	launch.job_id = ctx->step_req->job_id;
+	launch.mpi_jobid = ctx->step_req->mpi_jobid;
 	launch.uid = ctx->step_req->user_id;
 	launch.gid = params->gid;
 	if (!slurm_valid_uid_gid((uid_t)launch.uid, &launch.gid,
@@ -242,6 +244,8 @@ int slurm_step_launch (slurm_step_ctx_t *ctx,
 	launch.argv = params->argv;
 	launch.spank_job_env = params->spank_job_env;
 	launch.spank_job_env_size = params->spank_job_env_size;
+	launch.pelog_env = params->pelog_env;
+	launch.pelog_env_size = params->pelog_env_size;
 	launch.cred = ctx->step_resp->cred;
 	launch.job_step_id = ctx->step_resp->job_step_id;
 	if (params->env == NULL) {
@@ -267,6 +271,13 @@ int slurm_step_launch (slurm_step_ctx_t *ctx,
 	launch.alias_list	= params->alias_list;
 	launch.nnodes		= ctx->step_resp->step_layout->node_cnt;
 	launch.ntasks		= ctx->step_resp->step_layout->task_cnt;
+	launch.mpi_stepid	= params->mpi_stepid;
+	launch.mpi_ntasks	= params->mpi_ntasks;
+	launch.mpi_nnodes	= params->mpi_nnodes;
+	if (!launch.mpi_nnodes)
+		launch.mpi_nnodes = launch.nnodes;
+	launch.mpi_stepfnodeid	= params->mpi_stepfnodeid;
+	launch.mpi_stepftaskid	= params->mpi_stepftaskid;
 	launch.slurmd_debug	= params->slurmd_debug;
 	launch.switch_job	= ctx->step_resp->switch_job;
 	launch.profile		= params->profile;
@@ -299,6 +310,8 @@ int slurm_step_launch (slurm_step_ctx_t *ctx,
 	launch.options          = job_options_create();
 	launch.complete_nodelist =
 		xstrdup(ctx->step_resp->step_layout->node_list);
+	launch.packjobid        = packjobid;
+	launch.packstepid       = packstepid;
 	spank_set_remote_options (launch.options);
 	if (params->parallel_debug)
 		launch.flags |= LAUNCH_PARALLEL_DEBUG;
@@ -360,6 +373,7 @@ int slurm_step_launch (slurm_step_ctx_t *ctx,
 
 	launch.num_resp_port = ctx->launch_state->num_resp_port;
 	launch.resp_port = xmalloc(sizeof(uint16_t) * launch.num_resp_port);
+
 	for (i = 0; i < launch.num_resp_port; i++) {
 		launch.resp_port[i] = ctx->launch_state->resp_port[i];
 	}
@@ -424,6 +438,7 @@ int slurm_step_launch_add (slurm_step_ctx_t *ctx,
 
 	/* Start tasks on compute nodes */
 	launch.job_id = ctx->step_req->job_id;
+	launch.mpi_jobid = params->mpi_jobid;
 	launch.uid = ctx->step_req->user_id;
 	launch.gid = params->gid;
 	if (!slurm_valid_uid_gid((uid_t)launch.uid, &launch.gid,
@@ -433,6 +448,8 @@ int slurm_step_launch_add (slurm_step_ctx_t *ctx,
 	launch.argv = params->argv;
 	launch.spank_job_env = params->spank_job_env;
 	launch.spank_job_env_size = params->spank_job_env_size;
+	launch.pelog_env = params->pelog_env;
+	launch.pelog_env_size = params->pelog_env_size;
 	launch.cred = ctx->step_resp->cred;
 	launch.job_step_id = ctx->step_resp->job_step_id;
 	if (params->env == NULL) {
@@ -486,6 +503,8 @@ int slurm_step_launch_add (slurm_step_ctx_t *ctx,
 	launch.options          = job_options_create();
 	launch.complete_nodelist =
 		xstrdup(ctx->step_resp->step_layout->node_list);
+	launch.packjobid        = packjobid;
+	launch.packstepid       = packstepid;
 
 	spank_set_remote_options (launch.options);
 	if (params->parallel_debug)
@@ -624,6 +643,7 @@ void slurm_step_launch_wait_finish(slurm_step_ctx_t *ctx)
 	while (bit_set_count(sls->tasks_exited) < sls->tasks_requested) {
 		if (!sls->abort) {
 			slurm_cond_wait(&sls->cond, &sls->lock);
+
 		} else {
 			if (!sls->abort_action_taken) {
 				slurm_kill_job_step(ctx->job_id,
@@ -895,8 +915,8 @@ struct step_launch_state *step_launch_state_create(slurm_step_ctx_t *ctx)
 	sls->resp_port = NULL;
 	sls->abort = false;
 	sls->abort_action_taken = false;
-	sls->mpi_info->jobid = ctx->step_req->job_id;
-	sls->mpi_info->stepid = ctx->step_resp->job_step_id;
+	sls->mpi_info->jobid = ctx->mpi_jobid;
+	sls->mpi_info->stepid = packstepid;
 	sls->mpi_info->step_layout = layout;
 	sls->mpi_state = NULL;
 	slurm_mutex_init(&sls->lock);
@@ -1164,12 +1184,6 @@ _exit_handler(struct step_launch_state *sls, slurm_msg_t *exit_msg)
 	void (*task_finish)(task_exit_msg_t *);
 	int i;
 
-	if ((msg->job_id != sls->mpi_info->jobid) ||
-	    (msg->step_id != sls->mpi_info->stepid)) {
-		debug("Received MESSAGE_TASK_EXIT from wrong job: %u.%u",
-		      msg->job_id, msg->step_id);
-		return;
-	}
 
 	/* Record SIGTERM and SIGKILL termination codes to
 	 * recognize abnormal termination */
@@ -1715,7 +1729,6 @@ static int _launch_tasks(slurm_step_ctx_t *ctx,
 	}
 	list_iterator_destroy(ret_itr);
 	FREE_NULL_LIST(ret_list);
-
 	if (tot_rc != SLURM_SUCCESS)
 		return tot_rc;
 	return rc;

@@ -38,6 +38,10 @@
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA.
 \*****************************************************************************/
 
+#ifdef HAVE_CONFIG_H
+#  include "config.h"
+#endif
+
 #include <ctype.h>
 #include <errno.h>
 #include <grp.h>
@@ -966,6 +970,7 @@ slurm_sprint_job_info ( job_info_t * job_ptr, int one_liner )
 			xstrcat(out, "KillOInInvalidDependent=No");
 		if (job_ptr->bitflags & SPREAD_JOB)
 			xstrcat(out, "SpreadJob=Yes");
+			
 	}
 
 	/****** END OF JOB RECORD ******/

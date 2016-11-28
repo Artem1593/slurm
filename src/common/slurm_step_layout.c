@@ -99,6 +99,7 @@ slurm_step_layout_t *slurm_step_layout_create(
 	}
 
 	step_layout->task_cnt  = step_layout_req->num_tasks;
+
 	if (cluster_flags & CLUSTER_FLAG_FE) {
 		/* Limited job step support on front-end systems.
 		 * All jobs execute through front-end on Blue Gene.
