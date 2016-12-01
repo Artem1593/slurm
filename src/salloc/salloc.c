@@ -1250,7 +1250,7 @@ static int _count_jobs(int ac, char **av)
 	int index;
 
 	for (index = 0; index < ac; index++) {
-		if ((strcmp(av[index], ":") == 0)) {
+		if (!xstrcmp(av[index], ":")) {
 			pack_desc_count ++;
 			if (index+1 == ac)
 			        fatal( "Missing pack job specification "
@@ -1310,7 +1310,7 @@ static void _identify_job_descriptions(int ac, char **av)
 		dependency_position = 0;
 		for (index = current; index < ac; index++) {
 			command = xstrdup(av[index]);
-			if ((strcmp(command, ":") != 0)) {
+			if (xstrcmp(command, ":")) {
 				newcmd[i] = command;
 				if ((strncmp(command, "-d", 2) == 0) ||
 				    (strncmp(command, "--d", 3) == 0)) {
@@ -1765,7 +1765,7 @@ static int main_jobpack(int argc, char *argv[])
 		packleader = pack_job_env[group_number].packleader;
 		packjob = pack_job_env[group_number].pack_job;
 		if (packleader == true) {
-			if ((strcmp(pack_job_id, "") == 0))
+			if (!xstrcmp(pack_job_id, ""))
 				fatal( "found packleader but no pack job id" );
 			xstrcat(pack_job_env[group_number].av[
 				packl_dependency_position], pack_job_id);
